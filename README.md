@@ -25,6 +25,12 @@ Hệ thống được thiết kế theo cơ chế **"Thu đến đâu, vứt lê
 
 Vì vậy, máy học sinh chỉ đóng vai trò là "đường ống" truyền dữ liệu, Server mới là nơi lưu trữ an toàn thực sự.
 
+## 📊 Báo cáo tiến độ & Tình trạng dự án
+
+- **Kết quả thu thập:** Đã capture thành công raw video (student) và audio (student & mentor). Bản ghi WebM (Video) có chất lượng rất rõ nét. Phần audio từ dữ liệu thô (raw) đang được tiếp tục tinh chỉnh để đạt độ rõ tương đương.
+- **Hiệu năng & Rủi ro:** Hiện tại hệ thống hoạt động ổn định trên môi trường local. Tuy nhiên, việc lưu trữ/buffer dữ liệu lâu dài trên máy học sinh có nguy cơ gây tràn RAM hoặc lag trình duyệt do giới hạn tài nguyên.
+- **Định hướng tối ưu:** Đang nghiên cứu chuyển đổi quy trình sang định dạng **Base64** để giảm tải CPU/RAM và tiết kiệm băng thông. Việc triển khai chính thức sẽ được thực hiện ngay khi thống nhất định dạng file đầu ra cuối cùng cho hệ thống AI.
+
 ## 🚀 Hướng dẫn sử dụng
 
 ### 1. Khởi động Server (meet-capture-api)
