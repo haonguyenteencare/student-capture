@@ -1,8 +1,9 @@
 const API_BASE_URL = "http://localhost:8787";
-const UPLOAD_INTERVAL_MS = 5000;
+const UPLOAD_INTERVAL_AUDIO_MS = 5000;
+const UPLOAD_INTERVAL_VIDEO_MS = 15000;
+const MAX_BATCH_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 
 const sessions = new Map();
-const pendingUploads = new Map();
 
 const RECORDED_TYPES = new Set([
   "hook-installed",
@@ -154,22 +155,65 @@ const downloadJson = async (session) => {
   return { ok: true, filename: `${session.id}.json`, eventCount: session.events.length };
 };
 
-const uploadBatch = async (tabId) => {
-  const pending = pendingUploads.get(tabId) || [];
+const queueUpload = async (tabId, event) => {
+  const eventId = `event_${tabId}_${Date.now()}_${uuid()}`;
+  await chrome.storage.local.set({ [eventId]: event });
+};
 
-  if (pending.length === 0) {
+const uploadBatch = async (tabId, filterTypes = "all") => {
+  const storage = await chrome.storage.local.get(null);
+  const eventKeys = Object.keys(storage).filter((key) => key.startsWith(`event_${tabId}_`));
+
+  if (eventKeys.length === 0) {
     return;
   }
 
-  const session = sessions.get(tabId);
+  const events = [];
+  const keysToDelete = [];
+  let currentBatchSize = 0;
+  let remainingKeysOfSameFilterType = 0;
 
+  for (const key of eventKeys) {
+    const event = storage[key];
+    const isVideoOrMedia = event.type.startsWith("video-") || event.type.startsWith("media-");
+
+    if (filterTypes === "audio" && isVideoOrMedia) continue;
+    if (filterTypes === "video" && !isVideoOrMedia) continue;
+
+    const payload = getPayloadForUpload(event);
+    const jsonStr = JSON.stringify(payload);
+    const itemSize = jsonStr.length;
+
+    if (currentBatchSize + itemSize > MAX_BATCH_SIZE_BYTES && events.length > 0) {
+      remainingKeysOfSameFilterType++;
+      continue;
+    }
+
+    events.push(payload);
+    keysToDelete.push(key);
+    currentBatchSize += itemSize;
+  }
+
+  if (events.length === 0) {
+    return;
+  }
+
+  let session = sessions.get(tabId);
+
+  // Phục hồi session fallback nếu background worker bị khởi động lại
   if (!session) {
-    return;
+    session = {
+      meetingId: events[0].meetingId,
+      studentId: events[0].studentId,
+      sessionId: events[0].sessionId,
+      pageUrl: events[0].pageUrl,
+      upload: { uploadedEventCount: 0 },
+    };
   }
 
-  const batch = pending.splice(0, pending.length);
-
-  session.upload.lastAttemptAt = new Date().toISOString();
+  if (session.upload) {
+    session.upload.lastAttemptAt = new Date().toISOString();
+  }
 
   try {
     const response = await fetch(`${API_BASE_URL}/api/capture/batch`, {
@@ -183,7 +227,7 @@ const uploadBatch = async (tabId) => {
         sessionId: session.sessionId,
         pageUrl: session.pageUrl,
         userAgent: navigator.userAgent,
-        events: batch.map(getPayloadForUpload),
+        events: events,
       }),
     });
 
@@ -193,30 +237,62 @@ const uploadBatch = async (tabId) => {
 
     const result = await response.json();
 
-    session.upload.lastSuccessAt = new Date().toISOString();
-    session.upload.lastError = null;
-    session.upload.uploadedEventCount += result.savedEventCount || batch.length;
+    await chrome.storage.local.remove(keysToDelete);
+
+    if (session.upload) {
+      session.upload.lastSuccessAt = new Date().toISOString();
+      session.upload.lastError = null;
+      session.upload.uploadedEventCount += result.savedEventCount || events.length;
+    }
+
+    // Nếu vẫn còn dữ liệu thuộc filter này nhưng bị ngắt vì quá 5MB, upload tiếp ngay lập tức
+    if (remainingKeysOfSameFilterType > 0) {
+      setTimeout(() => uploadBatch(tabId, filterTypes), 100);
+    }
   } catch (error) {
-    pending.unshift(...batch);
-    session.upload.lastError = error.message;
+    if (session.upload) {
+      session.upload.lastError = error.message;
+    }
   }
 };
 
-const queueUpload = (tabId, event) => {
-  if (!pendingUploads.has(tabId)) {
-    pendingUploads.set(tabId, []);
-  }
+// Interval luồng Audio (nhanh, nhẹ)
+setInterval(async () => {
+  const storage = await chrome.storage.local.get(null);
+  const tabIds = new Set(
+    Object.keys(storage)
+      .filter((k) => k.startsWith("event_"))
+      .map((k) => parseInt(k.split("_")[1], 10))
+  );
 
-  pendingUploads.get(tabId).push(event);
-};
-
-setInterval(() => {
-  for (const tabId of pendingUploads.keys()) {
-    uploadBatch(tabId);
+  for (const tabId of tabIds) {
+    if (!isNaN(tabId)) uploadBatch(tabId, "audio");
   }
-}, UPLOAD_INTERVAL_MS);
+}, UPLOAD_INTERVAL_AUDIO_MS);
+
+// Interval luồng Video (chậm, nặng)
+setInterval(async () => {
+  const storage = await chrome.storage.local.get(null);
+  const tabIds = new Set(
+    Object.keys(storage)
+      .filter((k) => k.startsWith("event_"))
+      .map((k) => parseInt(k.split("_")[1], 10))
+  );
+
+  for (const tabId of tabIds) {
+    if (!isNaN(tabId)) uploadBatch(tabId, "video");
+  }
+}, UPLOAD_INTERVAL_VIDEO_MS);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "identity-updated") {
+    for (const session of sessions.values()) {
+      session.studentId = message.studentId;
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (message?.type === "raw-data-event" && sender.tab?.id !== undefined) {
     if (!RECORDED_TYPES.has(message.event.type)) {
       sendResponse({ ok: true, recorded: false });
@@ -224,7 +300,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     getSession(sender.tab.id, message.event.pageUrl)
-      .then((session) => {
+      .then(async (session) => {
         const event = {
           ...message.event,
           meetingId: session.meetingId,
@@ -233,12 +309,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         };
 
         session.events.push(getPayloadForExport(event));
-        queueUpload(sender.tab.id, event);
+        await queueUpload(sender.tab.id, event);
         sendResponse({
           ok: true,
           recorded: true,
           eventCount: session.events.length,
-          queuedUploadCount: pendingUploads.get(sender.tab.id)?.length || 0,
           meetingId: session.meetingId,
           studentId: session.studentId,
           sessionId: session.sessionId,
@@ -246,7 +321,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch((error) => sendResponse({ ok: false, reason: error.message }));
 
-    return true;
+    return true; // Keep the message channel open for async response
   }
 
   if (message?.type === "export-session") {
@@ -260,7 +335,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "flush-upload") {
-    uploadBatch(message.tabId)
+    // Flush tất cả
+    uploadBatch(message.tabId, "all")
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, reason: error.message }));
 
@@ -272,7 +348,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     if (session && session.events.length > 0) {
       session.endedAt = new Date().toISOString();
-      uploadBatch(sender.tab.id).catch(() => {});
+      uploadBatch(sender.tab.id, "all").catch(() => {});
       downloadJson(session).catch(() => {});
     }
 

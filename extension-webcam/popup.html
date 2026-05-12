@@ -16,6 +16,15 @@
       </div>
     </header>
 
+    <section id="identity-section" style="padding: 10px; border-bottom: 1px solid #333; display: flex; flex-direction: column; gap: 8px;">
+      <label for="studentIdInput" style="font-weight: 600;">Student ID:</label>
+      <div style="display: flex; gap: 8px;">
+        <input type="text" id="studentIdInput" placeholder="VD: hs-nguyen-van-a" style="flex: 1; padding: 6px; border: 1px solid #555; background: #222; color: white; border-radius: 4px;">
+        <button id="saveIdentity" type="button" style="padding: 6px 12px; background: #3b82f6; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold;">Lưu</button>
+      </div>
+      <div id="identityStatus" style="font-size: 12px; color: #a1a1aa;">Đang dùng ID ngẫu nhiên. Vui lòng cập nhật.</div>
+    </section>
+
     <section id="status">Waiting for Google Meet media...</section>
     <main id="events"></main>
 

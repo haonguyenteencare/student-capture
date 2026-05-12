@@ -3,6 +3,9 @@ const statusElement = document.querySelector("#status");
 const clearButton = document.querySelector("#clear");
 const exportButton = document.querySelector("#export");
 const viewerButton = document.querySelector("#viewer");
+const studentIdInput = document.querySelector("#studentIdInput");
+const saveIdentityButton = document.querySelector("#saveIdentity");
+const identityStatus = document.querySelector("#identityStatus");
 
 const summarizeEvent = (event) => {
   if (event.type === "video-frame") {
@@ -22,6 +25,18 @@ const summarizeEvent = (event) => {
 
 const render = async () => {
   const { events = [] } = await chrome.storage.local.get({ events: [] });
+  const { studentId } = await chrome.storage.local.get({ studentId: null });
+
+  if (studentId) {
+    studentIdInput.value = studentId;
+    if (studentId.startsWith("anon-")) {
+      identityStatus.textContent = "Đang dùng ID ẩn danh. Hãy cập nhật ID thật.";
+      identityStatus.style.color = "#fbbf24";
+    } else {
+      identityStatus.textContent = "Danh tính đã được xác nhận: " + studentId;
+      identityStatus.style.color = "#4ade80";
+    }
+  }
 
   statusElement.textContent = events.length
     ? summarizeEvent(events[0])
@@ -92,6 +107,15 @@ exportButton.addEventListener("click", async () => {
 
 viewerButton.addEventListener("click", async () => {
   await chrome.tabs.create({ url: chrome.runtime.getURL("viewer.html") });
+});
+
+saveIdentityButton.addEventListener("click", async () => {
+  const newId = studentIdInput.value.trim();
+  if (!newId) return;
+
+  await chrome.storage.local.set({ studentId: newId });
+  await chrome.runtime.sendMessage({ type: "identity-updated", studentId: newId });
+  await render();
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {

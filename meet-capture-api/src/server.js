@@ -27,7 +27,7 @@ const sanitizeSegment = (value, fallback) => {
 };
 
 const parseDataUrl = (dataUrl) => {
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/s.exec(dataUrl || "");
+  const match = /^data:([^,]*?)(;base64)?,(.*)$/s.exec(dataUrl || "");
 
   if (!match) {
     throw new Error("Invalid data URL");
@@ -147,7 +147,8 @@ const saveEvent = async (sessionDir, event, index) => {
   }
 
   if (event.type === "audio-recording") {
-    const audioDir = path.join(sessionDir, "audio");
+    const subFolder = String(payload.streamId).startsWith("remote-") ? "remote" : "local";
+    const audioDir = path.join(sessionDir, "audio", subFolder);
 
     await mkdir(audioDir, { recursive: true });
 
@@ -174,7 +175,8 @@ const saveEvent = async (sessionDir, event, index) => {
   }
 
   if (event.type === "media-recording") {
-    const recordingDir = path.join(sessionDir, "recordings");
+    const subFolder = String(payload.streamId).startsWith("remote-") ? "remote" : "local";
+    const recordingDir = path.join(sessionDir, "recordings", subFolder);
 
     await mkdir(recordingDir, { recursive: true });
 

@@ -187,11 +187,12 @@
         frameCount += 1;
         const now = performance.now();
 
-        if (now - lastSentAt >= 1000) {
-          lastSentAt = now;
+        try {
+          if (now - lastSentAt >= 1000) {
+            lastSentAt = now;
 
-          try {
-            const copyOptions = { format: "RGBA" };
+            try {
+              const copyOptions = { format: "RGBA" };
             const allocationSize = frame.allocationSize(copyOptions);
             const buffer = new Uint8Array(allocationSize);
             const layout = await frame.copyTo(buffer, copyOptions);
@@ -288,8 +289,9 @@
             }
           }
         }
-
-        frame.close();
+        } finally {
+          frame.close();
+        }
       }
     } catch (error) {
       post("video-reader-error", {
@@ -315,6 +317,7 @@
     const audioContext = new AudioContextCtor();
     const source = audioContext.createMediaStreamSource(new MediaStream([sampleTrack]));
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    let intervalId = null;
     let chunkCount = 0;
     let lastSentAt = 0;
     let recordingSamples = [];
@@ -325,6 +328,9 @@
     processor.connect(audioContext.destination);
 
     const cleanup = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
       processor.disconnect();
       source.disconnect();
       sampleTrack.stop();
@@ -379,11 +385,10 @@
         rms: Number(Math.sqrt(sumSquares / samplesCopy.length).toFixed(6)),
         peak: Number(peak.toFixed(6)),
         firstSamples: preview,
-        samples: samplesCopy,
       });
     };
 
-    window.setInterval(() => {
+    intervalId = window.setInterval(() => {
       if (recordingSamples.length === 0) {
         return;
       }
@@ -436,6 +441,129 @@
     inspectStream(stream, args[0]);
     return stream;
   };
+
+  const captureMentorAudio = () => {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return;
+
+    const audioContext = new AudioContextCtor();
+    const hookedElements = new WeakSet();
+
+    const hookAudioElement = (element) => {
+      // Bỏ qua nếu đã hook hoặc element đang bị mute (thường là preview local)
+      if (hookedElements.has(element)) return;
+      if (element.muted || element.volume === 0) return;
+      
+      hookedElements.add(element);
+
+      const streamId = `remote-${++state.streamCount}`;
+      let source;
+      try {
+        source = audioContext.createMediaElementSource(element);
+      } catch (e) {
+        // Bỏ qua nếu Meet đã kết nối element này vào một AudioContext khác
+        return;
+      }
+
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      let intervalId = null;
+      let chunkCount = 0;
+      let lastSentAt = 0;
+      let recordingSamples = [];
+      let recordingSampleRate = audioContext.sampleRate;
+      const maxRecordingSeconds = 20;
+
+      // Đảm bảo học sinh vẫn nghe thấy tiếng mentor
+      source.connect(audioContext.destination);
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      // Thêm luồng ghi âm dạng WebM
+      const streamDestination = audioContext.createMediaStreamDestination();
+      source.connect(streamDestination);
+      startMediaRecorder(streamDestination.stream, streamId);
+
+      const cleanup = () => {
+        if (intervalId !== null) window.clearInterval(intervalId);
+        processor.disconnect();
+        source.disconnect();
+        streamDestination.disconnect();
+        streamDestination.stream.getTracks().forEach(t => t.stop());
+      };
+
+      element.addEventListener("emptied", cleanup, { once: true });
+
+      processor.onaudioprocess = (event) => {
+        chunkCount += 1;
+        const now = performance.now();
+
+        if (now - lastSentAt < 1000) return;
+        lastSentAt = now;
+
+        const samples = event.inputBuffer.getChannelData(0);
+        const samplesCopy = Array.from(samples);
+        let peak = 0;
+        let sumSquares = 0;
+        const preview = [];
+
+        if (recordingSamples.length < recordingSampleRate * maxRecordingSeconds) {
+          const remaining = recordingSampleRate * maxRecordingSeconds - recordingSamples.length;
+          recordingSamples.push(...samplesCopy.slice(0, remaining));
+        }
+
+        for (let index = 0; index < samples.length; index += 1) {
+          const sample = samplesCopy[index];
+          const absolute = Math.abs(sample);
+          if (absolute > peak) peak = absolute;
+          sumSquares += sample * sample;
+          if (index < 24) preview.push(Number(sample.toFixed(6)));
+        }
+
+        post("audio-samples", {
+          streamId,
+          chunkCount,
+          track: { id: `mentor-${streamId}`, kind: "audio", label: "remote-mentor" },
+          sampleRate: audioContext.sampleRate,
+          channels: event.inputBuffer.numberOfChannels,
+          sampleCount: samplesCopy.length,
+          rms: Number(Math.sqrt(sumSquares / samplesCopy.length).toFixed(6)),
+          peak: Number(peak.toFixed(6)),
+          firstSamples: preview,
+        });
+      };
+
+      intervalId = window.setInterval(() => {
+        if (recordingSamples.length === 0) return;
+
+        post("audio-recording", {
+          streamId,
+          track: { id: `mentor-${streamId}`, kind: "audio", label: "remote-mentor" },
+          sampleRate: recordingSampleRate,
+          channels: 1,
+          sampleCount: recordingSamples.length,
+          samples: recordingSamples,
+        });
+
+        recordingSamples = [];
+      }, 5000);
+    };
+
+    // Hook các element đã có sẵn
+    document.querySelectorAll("audio, video").forEach(hookAudioElement);
+
+    // Lắng nghe sự kiện play để hook các element được Meet thêm vào sau
+    document.addEventListener("play", (e) => {
+      if (e.target.tagName === "AUDIO" || e.target.tagName === "VIDEO") {
+        hookAudioElement(e.target);
+      }
+    }, true);
+  };
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", captureMentorAudio);
+  } else {
+    captureMentorAudio();
+  }
 
   post("hook-installed", {
     userAgent: navigator.userAgent,
