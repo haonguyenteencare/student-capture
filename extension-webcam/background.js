@@ -160,67 +160,71 @@ const queueUpload = async (tabId, event) => {
   await chrome.storage.local.set({ [eventId]: event });
 };
 
+const activeUploads = new Set();
+
 const uploadBatch = async (tabId, filterTypes = "all") => {
-  const storage = await chrome.storage.local.get(null);
-  const eventKeys = Object.keys(storage).filter((key) => key.startsWith(`event_${tabId}_`));
-
-  if (eventKeys.length === 0) {
+  const lockKey = `${tabId}_${filterTypes}`;
+  if (activeUploads.has(lockKey)) {
     return;
   }
-
-  const events = [];
-  const keysToDelete = [];
-  let currentBatchSize = 0;
-  let remainingKeysOfSameFilterType = 0;
-
-  for (const key of eventKeys) {
-    const event = storage[key];
-    const isVideoOrMedia = event.type.startsWith("video-") || event.type.startsWith("media-");
-
-    if (filterTypes === "audio" && isVideoOrMedia) continue;
-    if (filterTypes === "video" && !isVideoOrMedia) continue;
-
-    const payload = getPayloadForUpload(event);
-    const jsonStr = JSON.stringify(payload);
-    const itemSize = jsonStr.length;
-
-    if (currentBatchSize + itemSize > MAX_BATCH_SIZE_BYTES && events.length > 0) {
-      remainingKeysOfSameFilterType++;
-      continue;
-    }
-
-    events.push(payload);
-    keysToDelete.push(key);
-    currentBatchSize += itemSize;
-  }
-
-  if (events.length === 0) {
-    return;
-  }
-
-  let session = sessions.get(tabId);
-
-  // Phục hồi session fallback nếu background worker bị khởi động lại
-  if (!session) {
-    session = {
-      meetingId: events[0].meetingId,
-      studentId: events[0].studentId,
-      sessionId: events[0].sessionId,
-      pageUrl: events[0].pageUrl,
-      upload: { uploadedEventCount: 0 },
-    };
-  }
-
-  if (session.upload) {
-    session.upload.lastAttemptAt = new Date().toISOString();
-  }
+  activeUploads.add(lockKey);
 
   try {
+    const storage = await chrome.storage.local.get(null);
+    const eventKeys = Object.keys(storage).filter((key) => key.startsWith(`event_${tabId}_`));
+
+    if (eventKeys.length === 0) return;
+
+    const events = [];
+    const keysToDelete = [];
+    let currentBatchSize = 0;
+    let remainingKeysOfSameFilterType = 0;
+
+    for (const key of eventKeys) {
+      const event = storage[key];
+      const isVideoOrMedia = event.type.startsWith("video-") || event.type.startsWith("media-");
+
+      if (filterTypes === "audio" && isVideoOrMedia) continue;
+      if (filterTypes === "video" && !isVideoOrMedia) continue;
+
+      const payload = getPayloadForUpload(event);
+      const jsonStr = JSON.stringify(payload);
+      const itemSize = jsonStr.length;
+
+      if (currentBatchSize + itemSize > MAX_BATCH_SIZE_BYTES && events.length > 0) {
+        remainingKeysOfSameFilterType++;
+        continue;
+      }
+
+      events.push(payload);
+      keysToDelete.push(key);
+      currentBatchSize += itemSize;
+    }
+
+    if (events.length === 0) return;
+
+    let session = sessions.get(tabId);
+    if (!session) {
+      session = {
+        meetingId: events[0].meetingId,
+        studentId: events[0].studentId,
+        sessionId: events[0].sessionId,
+        pageUrl: events[0].pageUrl,
+        upload: { uploadedEventCount: 0 },
+      };
+    }
+
+    if (session.upload) {
+      session.upload.lastAttemptAt = new Date().toISOString();
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
     const response = await fetch(`${API_BASE_URL}/api/capture/batch`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
       body: JSON.stringify({
         meetingId: session.meetingId,
         studentId: session.studentId,
@@ -231,12 +235,10 @@ const uploadBatch = async (tabId, filterTypes = "all") => {
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(`API responded ${response.status}`);
-    }
+    clearTimeout(timeoutId);
 
+    if (!response.ok) throw new Error(`API responded ${response.status}`);
     const result = await response.json();
-
     await chrome.storage.local.remove(keysToDelete);
 
     if (session.upload) {
@@ -245,14 +247,17 @@ const uploadBatch = async (tabId, filterTypes = "all") => {
       session.upload.uploadedEventCount += result.savedEventCount || events.length;
     }
 
-    // Nếu vẫn còn dữ liệu thuộc filter này nhưng bị ngắt vì quá 5MB, upload tiếp ngay lập tức
     if (remainingKeysOfSameFilterType > 0) {
       setTimeout(() => uploadBatch(tabId, filterTypes), 100);
     }
   } catch (error) {
-    if (session.upload) {
+    console.error("Upload Error:", error);
+    let session = sessions.get(tabId);
+    if (session && session.upload) {
       session.upload.lastError = error.message;
     }
+  } finally {
+    activeUploads.delete(lockKey);
   }
 };
 

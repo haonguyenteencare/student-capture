@@ -28,8 +28,8 @@ async function stitchFiles() {
         const remoteDir = path.join(sessionPath, "recordings", "remote");
         const oldDir = path.join(sessionPath, "recordings");
 
-        await processDirectory(localDir, "local_full_video.webm");
-        await processDirectory(remoteDir, "remote_full_video.webm");
+        await processDirectory(localDir, "student_full_video.webm");
+        await processDirectory(remoteDir, "mentor_full_video.webm");
         await processDirectory(oldDir, "old_full_video.webm");
       }
     }
@@ -44,23 +44,23 @@ async function processDirectory(dir, outputPrefix) {
 
     if (webmFiles.length === 0) return;
 
-    // Phân nhóm theo streamId (VD: 1778559971690-local-1-0002.webm -> streamId = "local-1")
+    // Phân nhóm theo Loại (local/remote) để gom chung Mentor/Student
     const streams = {};
     for (const file of webmFiles) {
       const parts = file.split("-");
-      // Format: timestamp-type-id-index.webm (VD: 171...-local-1-0002.webm)
       if (parts.length >= 4) {
-        const streamId = `${parts[1]}-${parts[2]}`; // "local-1"
-        if (!streams[streamId]) streams[streamId] = [];
-        streams[streamId].push(file);
+        const type = parts[1]; // "local" hoặc "remote"
+        if (!streams[type]) streams[type] = [];
+        streams[type].push(file);
       }
     }
 
-    for (const [streamId, chunks] of Object.entries(streams)) {
-      const outputPath = path.join(dir, `${streamId}_${outputPrefix}`);
+    for (const [type, chunks] of Object.entries(streams)) {
+      const role = type === "local" ? "student" : "mentor";
+      const outputPath = path.join(dir, `${role}_full_video.webm`);
       const outputHandle = await fs.open(outputPath, "w");
 
-      console.log(`Đang gộp ${chunks.length} chunk của luồng [${streamId}] tại: ${dir}...`);
+      console.log(`Đang gộp ${chunks.length} chunk của [${role}] tại: ${dir}...`);
       
       for (const file of chunks) {
         const buffer = await fs.readFile(path.join(dir, file));

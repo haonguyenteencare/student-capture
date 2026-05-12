@@ -302,7 +302,7 @@
     }
   };
 
-  const readAudioSamples = (track, streamId) => {
+  const readAudioSamples = (stream, track, streamId) => {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 
     if (!AudioContextCtor) {
@@ -313,9 +313,18 @@
       return;
     }
 
-    const sampleTrack = track.clone();
+    // WORKAROUND CHROME BUG: Chrome có một lỗi kinh điển khiến createMediaStreamSource
+    // trả về toàn số 0 (im lặng) nếu luồng đó là remote WebRTC stream và không được
+    // gắn vào một thẻ <audio> nào đang phát. Chúng ta tạo một thẻ audio ẩn để "mồi".
+    const dummyAudio = new Audio();
+    dummyAudio.srcObject = stream;
+    dummyAudio.muted = true; // Mute để không bị vang tiếng
+    dummyAudio.play().catch(() => {});
+
     const audioContext = new AudioContextCtor();
-    const source = audioContext.createMediaStreamSource(new MediaStream([sampleTrack]));
+    // Bỏ track.clone() vì clone một remote track thường gây lỗi câm trên Chrome.
+    // Dùng trực tiếp MediaStream gốc chứa track đó.
+    const source = audioContext.createMediaStreamSource(stream);
     const processor = audioContext.createScriptProcessor(4096, 1, 1);
     let intervalId = null;
     let chunkCount = 0;
@@ -333,32 +342,40 @@
       }
       processor.disconnect();
       source.disconnect();
-      sampleTrack.stop();
+      dummyAudio.srcObject = null;
       audioContext.close().catch(() => {});
     };
 
     track.addEventListener("ended", cleanup, { once: true });
 
+    // Trạng thái cho Noise Gate lúc thu
+    let envelope = 0;
+    const attack = 0.05;
+    const release = 0.001;
+    const noiseThreshold = 0.005;
+
     processor.onaudioprocess = (event) => {
       chunkCount += 1;
       const now = performance.now();
-
-      if (now - lastSentAt < 1000) {
-        return;
-      }
-
-      lastSentAt = now;
-
       const samples = event.inputBuffer.getChannelData(0);
       const samplesCopy = Array.from(samples);
+
+      // --- BƯỚC 1: LUÔN LUÔN THU ÂM (LIỀN MẠCH - NGUYÊN BẢN) ---
+      if (recordingSamples.length < recordingSampleRate * maxRecordingSeconds) {
+        const remaining = recordingSampleRate * maxRecordingSeconds - recordingSamples.length;
+        // Thu trực tiếp mẫu âm thanh nguyên bản, không qua bộ lọc để đảm bảo High-Fidelity
+        recordingSamples.push(...samplesCopy.slice(0, remaining));
+      }
+
+      // --- BƯỚC 2: CHỈ GỬI THÔNG TIN PREVIEW MỖI GIÂY 1 LẦN ---
+      if (now - lastSentAt < 1000) {
+        return; // Dừng ở đây để tiết kiệm CPU, không tính toán RMS và không gửi postMessage liên tục
+      }
+      lastSentAt = now;
+
       let peak = 0;
       let sumSquares = 0;
       const preview = [];
-
-      if (recordingSamples.length < recordingSampleRate * maxRecordingSeconds) {
-        const remaining = recordingSampleRate * maxRecordingSeconds - recordingSamples.length;
-        recordingSamples.push(...samplesCopy.slice(0, remaining));
-      }
 
       for (let index = 0; index < samples.length; index += 1) {
         const sample = samplesCopy[index];
@@ -389,20 +406,19 @@
     };
 
     intervalId = window.setInterval(() => {
-      if (recordingSamples.length === 0) {
-        return;
-      }
+      if (recordingSamples.length === 0) return;
+
+      const samplesToSend = recordingSamples;
+      recordingSamples = [];
 
       post("audio-recording", {
         streamId,
         track: summarizeTrack(track),
         sampleRate: recordingSampleRate,
         channels: 1,
-        sampleCount: recordingSamples.length,
-        samples: recordingSamples,
+        sampleCount: samplesToSend.length,
+        samples: samplesToSend,
       });
-
-      recordingSamples = [];
     }, 5000);
   };
 
@@ -422,7 +438,7 @@
     }
 
     for (const track of stream.getAudioTracks()) {
-      readAudioSamples(track, streamId);
+      readAudioSamples(stream, track, streamId);
     }
   };
 
@@ -436,134 +452,70 @@
   const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
 
   mediaDevices.getUserMedia = async (...args) => {
-    post("get-user-media-called", { constraints: args[0] });
-    const stream = await originalGetUserMedia(...args);
-    inspectStream(stream, args[0]);
+    // Ép trình duyệt bật chế độ lọc tiếng ồn phần cứng/trình duyệt
+    let constraints = args[0] || {};
+    if (constraints.audio) {
+      if (typeof constraints.audio === 'boolean') {
+        constraints.audio = { noiseSuppression: true, echoCancellation: true, autoGainControl: true };
+      } else if (typeof constraints.audio === 'object') {
+        constraints.audio.noiseSuppression = true;
+        constraints.audio.echoCancellation = true;
+        constraints.audio.autoGainControl = true;
+      }
+    }
+
+    post("get-user-media-called", { constraints });
+    const stream = await originalGetUserMedia(constraints);
+    inspectStream(stream, constraints);
     return stream;
   };
 
   const captureMentorAudio = () => {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextCtor) return;
+    const OrigPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+    if (!OrigPeerConnection) return;
 
-    const audioContext = new AudioContextCtor();
-    const hookedElements = new WeakSet();
+    console.log("[MeetRawData] Hooking RTCPeerConnection constructor...");
 
-    const hookAudioElement = (element) => {
-      // Bỏ qua nếu đã hook hoặc element đang bị mute (thường là preview local)
-      if (hookedElements.has(element)) return;
-      if (element.muted || element.volume === 0) return;
+    const hookedTracks = new WeakSet();
+
+    const WrappedRTCPeerConnection = function(...args) {
+      const pc = new OrigPeerConnection(...args);
       
-      hookedElements.add(element);
+      pc.addEventListener("track", (event) => {
+        if (event.track.kind === "audio") {
+          if (hookedTracks.has(event.track)) return;
+          hookedTracks.add(event.track);
 
-      const streamId = `remote-${++state.streamCount}`;
-      let source;
-      try {
-        source = audioContext.createMediaElementSource(element);
-      } catch (e) {
-        // Bỏ qua nếu Meet đã kết nối element này vào một AudioContext khác
-        return;
-      }
+          const streamId = `remote-${++state.streamCount}`;
+          const stream = event.streams[0] || new MediaStream([event.track]);
+          
+          console.log(`[MeetRawData] Remote audio track detected! streamId: ${streamId}`, event.track);
 
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
-      let intervalId = null;
-      let chunkCount = 0;
-      let lastSentAt = 0;
-      let recordingSamples = [];
-      let recordingSampleRate = audioContext.sampleRate;
-      const maxRecordingSeconds = 20;
-
-      // Đảm bảo học sinh vẫn nghe thấy tiếng mentor
-      source.connect(audioContext.destination);
-      source.connect(processor);
-      processor.connect(audioContext.destination);
-
-      // Thêm luồng ghi âm dạng WebM
-      const streamDestination = audioContext.createMediaStreamDestination();
-      source.connect(streamDestination);
-      startMediaRecorder(streamDestination.stream, streamId);
-
-      const cleanup = () => {
-        if (intervalId !== null) window.clearInterval(intervalId);
-        processor.disconnect();
-        source.disconnect();
-        streamDestination.disconnect();
-        streamDestination.stream.getTracks().forEach(t => t.stop());
-      };
-
-      element.addEventListener("emptied", cleanup, { once: true });
-
-      processor.onaudioprocess = (event) => {
-        chunkCount += 1;
-        const now = performance.now();
-
-        if (now - lastSentAt < 1000) return;
-        lastSentAt = now;
-
-        const samples = event.inputBuffer.getChannelData(0);
-        const samplesCopy = Array.from(samples);
-        let peak = 0;
-        let sumSquares = 0;
-        const preview = [];
-
-        if (recordingSamples.length < recordingSampleRate * maxRecordingSeconds) {
-          const remaining = recordingSampleRate * maxRecordingSeconds - recordingSamples.length;
-          recordingSamples.push(...samplesCopy.slice(0, remaining));
+          post("stream-captured", {
+            streamId,
+            constraints: { remote: true },
+            tracks: stream.getTracks().map(summarizeTrack),
+          });
+          
+          startMediaRecorder(stream, streamId);
+          readAudioSamples(stream, event.track, streamId);
         }
-
-        for (let index = 0; index < samples.length; index += 1) {
-          const sample = samplesCopy[index];
-          const absolute = Math.abs(sample);
-          if (absolute > peak) peak = absolute;
-          sumSquares += sample * sample;
-          if (index < 24) preview.push(Number(sample.toFixed(6)));
-        }
-
-        post("audio-samples", {
-          streamId,
-          chunkCount,
-          track: { id: `mentor-${streamId}`, kind: "audio", label: "remote-mentor" },
-          sampleRate: audioContext.sampleRate,
-          channels: event.inputBuffer.numberOfChannels,
-          sampleCount: samplesCopy.length,
-          rms: Number(Math.sqrt(sumSquares / samplesCopy.length).toFixed(6)),
-          peak: Number(peak.toFixed(6)),
-          firstSamples: preview,
-        });
-      };
-
-      intervalId = window.setInterval(() => {
-        if (recordingSamples.length === 0) return;
-
-        post("audio-recording", {
-          streamId,
-          track: { id: `mentor-${streamId}`, kind: "audio", label: "remote-mentor" },
-          sampleRate: recordingSampleRate,
-          channels: 1,
-          sampleCount: recordingSamples.length,
-          samples: recordingSamples,
-        });
-
-        recordingSamples = [];
-      }, 5000);
+      });
+      
+      return pc;
     };
 
-    // Hook các element đã có sẵn
-    document.querySelectorAll("audio, video").forEach(hookAudioElement);
+    WrappedRTCPeerConnection.prototype = OrigPeerConnection.prototype;
+    Object.assign(WrappedRTCPeerConnection, OrigPeerConnection);
 
-    // Lắng nghe sự kiện play để hook các element được Meet thêm vào sau
-    document.addEventListener("play", (e) => {
-      if (e.target.tagName === "AUDIO" || e.target.tagName === "VIDEO") {
-        hookAudioElement(e.target);
-      }
-    }, true);
+    window.RTCPeerConnection = WrappedRTCPeerConnection;
+    if (window.webkitRTCPeerConnection) {
+      window.webkitRTCPeerConnection = WrappedRTCPeerConnection;
+    }
   };
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", captureMentorAudio);
-  } else {
-    captureMentorAudio();
-  }
+  // Thực thi ngay lập tức thay vì đợi DOMContentLoaded để không bỏ lỡ các PC khởi tạo sớm
+  captureMentorAudio();
 
   post("hook-installed", {
     userAgent: navigator.userAgent,
