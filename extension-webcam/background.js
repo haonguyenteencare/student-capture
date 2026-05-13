@@ -114,7 +114,6 @@ const checkServerAndNotify = async () => {
       serverOnline = true;
       chrome.notifications.create("server-back", {
         type: "basic",
-        iconUrl: "icons/icon48.png",
         title: "✅ Kết nối đã phục hồi",
         message: "Server đã hoạt động trở lại. Dữ liệu tồn đọng sẽ được gửi lên ngay.",
         priority: 1,
@@ -126,7 +125,6 @@ const checkServerAndNotify = async () => {
       serverOnline = false;
       chrome.notifications.create("server-down", {
         type: "basic",
-        iconUrl: "icons/icon48.png",
         title: "⚠️ Mất kết nối server!",
         message: "Đừng tắt Google Meet. Dữ liệu đang được lưu tạm, sẽ gửi lên khi có mạng trở lại.",
         priority: 2,
@@ -134,6 +132,9 @@ const checkServerAndNotify = async () => {
     }
   }
 };
+
+// Chạy kiểm tra ngay khi Service Worker khởi động
+checkServerAndNotify();
 
 // Retry flush + kiểm tra server mỗi 10 giây
 setInterval(() => {
