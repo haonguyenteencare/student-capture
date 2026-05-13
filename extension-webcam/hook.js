@@ -192,59 +192,13 @@
 
             try {
               const copyOptions = { format: "RGBA" };
-            const allocationSize = frame.allocationSize(copyOptions);
-            const buffer = new Uint8Array(allocationSize);
-            const layout = await frame.copyTo(buffer, copyOptions);
-            const thumbnailDataUrl = await makeThumbnailDataUrl(
-              buffer,
-              frame.displayWidth,
-              frame.displayHeight,
-            );
-            const includeRawFrame = now - lastRawSentAt >= 10000;
-
-            if (includeRawFrame) {
-              lastRawSentAt = now;
-            }
-
-            post("video-frame", {
-              streamId,
-              frameCount,
-              rawSource: "VideoFrame.copyTo(RGBA)",
-              sourceFormat: frame.format,
-              copiedFormat: "RGBA",
-              track: summarizeTrack(track),
-              codedWidth: frame.codedWidth,
-              codedHeight: frame.codedHeight,
-              displayWidth: frame.displayWidth,
-              displayHeight: frame.displayHeight,
-              duration: frame.duration,
-              format: frame.format,
-              timestamp: frame.timestamp,
-              allocationSize,
-              copiedBytes: buffer.byteLength,
-              checksum: makeChecksum(buffer),
-              firstBytes: Array.from(buffer.slice(0, 24)),
-              thumbnailDataUrl,
-              rgbaDataUrl: includeRawFrame
-                ? await blobToDataUrl(new Blob([buffer], { type: "application/octet-stream" }))
-                : null,
-              layout,
-            });
-          } catch (error) {
-            try {
-              const bitmap = await createImageBitmap(frame);
-              const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-              const context = canvas.getContext("2d", { willReadFrequently: true });
-
-              context.drawImage(bitmap, 0, 0);
-
-              const imageData = context.getImageData(0, 0, bitmap.width, bitmap.height);
-              const buffer = imageData.data;
-              const allocationSize = buffer.byteLength;
+              const allocationSize = frame.allocationSize(copyOptions);
+              const buffer = new Uint8Array(allocationSize);
+              const layout = await frame.copyTo(buffer, copyOptions);
               const thumbnailDataUrl = await makeThumbnailDataUrl(
                 buffer,
-                bitmap.width,
-                bitmap.height,
+                frame.displayWidth,
+                frame.displayHeight,
               );
               const includeRawFrame = now - lastRawSentAt >= 10000;
 
@@ -255,39 +209,85 @@
               post("video-frame", {
                 streamId,
                 frameCount,
-                rawSource: "canvas.getImageData(RGBA)",
+                rawSource: "VideoFrame.copyTo(RGBA)",
                 sourceFormat: frame.format,
                 copiedFormat: "RGBA",
-                copyToError: error.message,
                 track: summarizeTrack(track),
                 codedWidth: frame.codedWidth,
                 codedHeight: frame.codedHeight,
                 displayWidth: frame.displayWidth,
                 displayHeight: frame.displayHeight,
                 duration: frame.duration,
-                format: "RGBA",
+                format: frame.format,
                 timestamp: frame.timestamp,
                 allocationSize,
-                copiedBytes: allocationSize,
+                copiedBytes: buffer.byteLength,
                 checksum: makeChecksum(buffer),
                 firstBytes: Array.from(buffer.slice(0, 24)),
                 thumbnailDataUrl,
                 rgbaDataUrl: includeRawFrame
                   ? await blobToDataUrl(new Blob([buffer], { type: "application/octet-stream" }))
                   : null,
+                layout,
               });
+            } catch (error) {
+              try {
+                const bitmap = await createImageBitmap(frame);
+                const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+                const context = canvas.getContext("2d", { willReadFrequently: true });
 
-              bitmap.close();
-            } catch (fallbackError) {
-              post("video-frame-error", {
-                streamId,
-                track: summarizeTrack(track),
-                message: error.message,
-                fallbackMessage: fallbackError.message,
-              });
+                context.drawImage(bitmap, 0, 0);
+
+                const imageData = context.getImageData(0, 0, bitmap.width, bitmap.height);
+                const buffer = imageData.data;
+                const allocationSize = buffer.byteLength;
+                const thumbnailDataUrl = await makeThumbnailDataUrl(
+                  buffer,
+                  bitmap.width,
+                  bitmap.height,
+                );
+                const includeRawFrame = now - lastRawSentAt >= 10000;
+
+                if (includeRawFrame) {
+                  lastRawSentAt = now;
+                }
+
+                post("video-frame", {
+                  streamId,
+                  frameCount,
+                  rawSource: "canvas.getImageData(RGBA)",
+                  sourceFormat: frame.format,
+                  copiedFormat: "RGBA",
+                  copyToError: error.message,
+                  track: summarizeTrack(track),
+                  codedWidth: frame.codedWidth,
+                  codedHeight: frame.codedHeight,
+                  displayWidth: frame.displayWidth,
+                  displayHeight: frame.displayHeight,
+                  duration: frame.duration,
+                  format: "RGBA",
+                  timestamp: frame.timestamp,
+                  allocationSize,
+                  copiedBytes: allocationSize,
+                  checksum: makeChecksum(buffer),
+                  firstBytes: Array.from(buffer.slice(0, 24)),
+                  thumbnailDataUrl,
+                  rgbaDataUrl: includeRawFrame
+                    ? await blobToDataUrl(new Blob([buffer], { type: "application/octet-stream" }))
+                    : null,
+                });
+
+                bitmap.close();
+              } catch (fallbackError) {
+                post("video-frame-error", {
+                  streamId,
+                  track: summarizeTrack(track),
+                  message: error.message,
+                  fallbackMessage: fallbackError.message,
+                });
+              }
             }
           }
-        }
         } finally {
           frame.close();
         }
