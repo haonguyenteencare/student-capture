@@ -1,526 +1,195 @@
 (() => {
-  const marker = "__meetRawDataPocHooked";
+  if (window.__meetHooked) return;
+  window.__meetHooked = true;
 
-  if (window[marker]) {
-    return;
-  }
+  let streamCount = 0;
+  const hookedTracks = new WeakSet();
 
-  window[marker] = true;
+  const post = (type, payload = {}) =>
+    window.postMessage({ source: "meet-poc", type, payload, at: Date.now() }, "*");
 
-  const state = {
-    streamCount: 0,
-    tracks: new Map(),
-  };
+  // --- AUDIO: F32 raw, flush mỗi 5 giây ---
+  const captureAudio = (stream, track, streamId) => {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
 
-  const post = (type, payload = {}) => {
-    window.postMessage(
-      {
-        source: "meet-raw-data-poc",
-        type,
-        payload,
-        at: Date.now(),
-      },
-      "*",
-    );
-  };
+    // Chrome bug workaround: dummy audio để remote stream không bị câm
+    const dummy = new Audio();
+    dummy.srcObject = stream;
+    dummy.muted = true;
+    dummy.play().catch(() => {});
 
-  const summarizeTrack = (track) => ({
-    id: track.id,
-    kind: track.kind,
-    label: track.label,
-    enabled: track.enabled,
-    muted: track.muted,
-    readyState: track.readyState,
-    settings: typeof track.getSettings === "function" ? track.getSettings() : {},
-  });
+    const ctx = new AudioCtx();
+    const source = ctx.createMediaStreamSource(stream);
+    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    let bucket = [];
 
-  const makeChecksum = (bytes) => {
-    let checksum = 2166136261;
-    const limit = Math.min(bytes.length, 8192);
+    source.connect(processor);
+    processor.connect(ctx.destination);
 
-    for (let index = 0; index < limit; index += 1) {
-      checksum ^= bytes[index];
-      checksum = Math.imul(checksum, 16777619);
-    }
+    processor.onaudioprocess = (e) => {
+      bucket.push(...e.inputBuffer.getChannelData(0));
+    };
 
-    return (checksum >>> 0).toString(16).padStart(8, "0");
-  };
+    const interval = setInterval(() => {
+      if (bucket.length === 0) return;
+      const samples = bucket;
+      bucket = [];
 
-  const blobToDataUrl = (blob) =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-
-      reader.addEventListener("load", () => resolve(reader.result));
-      reader.addEventListener("error", () => reject(reader.error));
-      reader.readAsDataURL(blob);
-    });
-
-  const makeThumbnailDataUrl = async (rgbaBytes, width, height) => {
-    if (!("OffscreenCanvas" in window) || !("ImageData" in window)) {
-      return null;
-    }
-
-    const sourceCanvas = new OffscreenCanvas(width, height);
-    const sourceContext = sourceCanvas.getContext("2d");
-    const thumbnailWidth = 240;
-    const thumbnailHeight = Math.max(1, Math.round((height / width) * thumbnailWidth));
-    const thumbnailCanvas = new OffscreenCanvas(thumbnailWidth, thumbnailHeight);
-    const thumbnailContext = thumbnailCanvas.getContext("2d");
-
-    sourceContext.putImageData(new ImageData(new Uint8ClampedArray(rgbaBytes), width, height), 0, 0);
-    thumbnailContext.drawImage(sourceCanvas, 0, 0, thumbnailWidth, thumbnailHeight);
-
-    const blob = await thumbnailCanvas.convertToBlob({ type: "image/jpeg", quality: 0.72 });
-
-    return blobToDataUrl(blob);
-  };
-
-  const startMediaRecorder = (stream, streamId) => {
-    if (!("MediaRecorder" in window)) {
-      post("media-recorder-unsupported", {
-        streamId,
-        reason: "MediaRecorder is not available",
-      });
-      return;
-    }
-
-    const clonedTracks = stream.getTracks().map((track) => track.clone());
-    const recordingStream = new MediaStream(clonedTracks);
-    const supportedTypes = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm",
-      "audio/webm;codecs=opus",
-      "audio/webm",
-    ];
-    const mimeType =
-      supportedTypes.find((type) => MediaRecorder.isTypeSupported(type)) || "";
-
-    try {
-      const recorder = new MediaRecorder(recordingStream, mimeType ? { mimeType } : undefined);
-
-      recorder.addEventListener("dataavailable", async (event) => {
-        if (!event.data || event.data.size === 0) {
-          return;
-        }
-
-        try {
-          post("media-recording", {
-            streamId,
-            mimeType: recorder.mimeType,
-            size: event.data.size,
-            hasAudio: recordingStream.getAudioTracks().length > 0,
-            hasVideo: recordingStream.getVideoTracks().length > 0,
-            dataUrl: await blobToDataUrl(event.data),
-          });
-        } catch (error) {
-          post("media-recording-error", {
-            streamId,
-            message: error.message,
-          });
-        }
-      });
-
-      recorder.start(5000);
-
-      for (const track of stream.getTracks()) {
-        track.addEventListener(
-          "ended",
-          () => {
-            if (recorder.state !== "inactive") {
-              recorder.stop();
-            }
-
-            for (const clonedTrack of clonedTracks) {
-              clonedTrack.stop();
-            }
-          },
-          { once: true },
-        );
+      // Encode F32 → base64
+      const f32 = new Float32Array(samples);
+      const u8 = new Uint8Array(f32.buffer);
+      let bin = "";
+      for (let i = 0; i < u8.length; i += 8192) {
+        bin += String.fromCharCode(...u8.subarray(i, i + 8192));
       }
 
-      post("media-recorder-started", {
+      post("audio-chunk", {
         streamId,
-        mimeType: recorder.mimeType,
-        hasAudio: recordingStream.getAudioTracks().length > 0,
-        hasVideo: recordingStream.getVideoTracks().length > 0,
+        sampleRate: ctx.sampleRate,
+        sampleCount: samples.length,
+        encoding: "f32le",
+        dataBase64: btoa(bin),
       });
-    } catch (error) {
-      post("media-recorder-error", {
-        streamId,
-        message: error.message,
-      });
-    }
-  };
-
-  const readVideoFrames = async (track, streamId) => {
-    if (!("MediaStreamTrackProcessor" in window) || !("VideoFrame" in window)) {
-      post("video-unsupported", {
-        track: summarizeTrack(track),
-        reason: "MediaStreamTrackProcessor or VideoFrame is not available",
-      });
-      return;
-    }
-
-    const sampleTrack = track.clone();
-    const processor = new MediaStreamTrackProcessor({ track: sampleTrack });
-    const reader = processor.readable.getReader();
-    let lastSentAt = 0;
-    let lastRawSentAt = 0;
-    let frameCount = 0;
-
-    state.tracks.set(sampleTrack.id, sampleTrack);
+    }, 5000);
 
     track.addEventListener("ended", () => {
-      sampleTrack.stop();
+      clearInterval(interval);
+      processor.disconnect();
+      source.disconnect();
+      dummy.srcObject = null;
+      ctx.close().catch(() => {});
+    }, { once: true });
+  };
+
+  // --- VIDEO: RGBA raw + JPEG thumbnail, 1 frame / 3 giây ---
+  const captureVideo = (track, streamId) => {
+    if (!("MediaStreamTrackProcessor" in window)) return;
+
+    const clone = track.clone();
+    const processor = new MediaStreamTrackProcessor({ track: clone });
+    const reader = processor.readable.getReader();
+    let lastSent = 0;
+
+    track.addEventListener("ended", () => {
+      clone.stop();
       reader.cancel().catch(() => {});
-    });
+    }, { once: true });
 
-    try {
-      while (sampleTrack.readyState === "live") {
+    (async () => {
+      while (clone.readyState === "live") {
         const { done, value: frame } = await reader.read();
-
-        if (done || !frame) {
-          break;
-        }
-
-        frameCount += 1;
-        const now = performance.now();
+        if (done || !frame) break;
 
         try {
-          if (now - lastSentAt >= 1000) {
-            lastSentAt = now;
+          const now = performance.now();
+          if (now - lastSent < 3000) continue;
+          lastSent = now;
 
-            try {
-              const copyOptions = { format: "RGBA" };
-            const allocationSize = frame.allocationSize(copyOptions);
-            const buffer = new Uint8Array(allocationSize);
-            const layout = await frame.copyTo(buffer, copyOptions);
-            const thumbnailDataUrl = await makeThumbnailDataUrl(
-              buffer,
-              frame.displayWidth,
-              frame.displayHeight,
-            );
-            const includeRawFrame = now - lastRawSentAt >= 5000;
+          // RGBA raw — giữ nguyên resolution gốc
+          const buf = new Uint8Array(frame.allocationSize({ format: "RGBA" }));
+          await frame.copyTo(buf, { format: "RGBA" });
 
-            if (includeRawFrame) {
-              lastRawSentAt = now;
-            }
+          // Thumbnail JPEG full resolution
+          const canvas = new OffscreenCanvas(frame.displayWidth, frame.displayHeight);
+          canvas.getContext("2d").putImageData(
+            new ImageData(new Uint8ClampedArray(buf), frame.displayWidth, frame.displayHeight),
+            0, 0,
+          );
+          const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+          const thumbDataUrl = await blob.arrayBuffer().then((ab) => {
+            let bin = "";
+            const u8 = new Uint8Array(ab);
+            for (let i = 0; i < u8.length; i += 8192)
+              bin += String.fromCharCode(...u8.subarray(i, i + 8192));
+            return "data:image/jpeg;base64," + btoa(bin);
+          });
 
-            post("video-frame", {
-              streamId,
-              frameCount,
-              rawSource: "VideoFrame.copyTo(RGBA)",
-              sourceFormat: frame.format,
-              copiedFormat: "RGBA",
-              track: summarizeTrack(track),
-              codedWidth: frame.codedWidth,
-              codedHeight: frame.codedHeight,
-              displayWidth: frame.displayWidth,
-              displayHeight: frame.displayHeight,
-              duration: frame.duration,
-              format: frame.format,
-              timestamp: frame.timestamp,
-              allocationSize,
-              copiedBytes: buffer.byteLength,
-              checksum: makeChecksum(buffer),
-              firstBytes: Array.from(buffer.slice(0, 24)),
-              thumbnailDataUrl,
-              rgbaDataUrl: includeRawFrame
-                ? await blobToDataUrl(new Blob([buffer], { type: "application/octet-stream" }))
-                : null,
-              layout,
-            });
-          } catch (error) {
-            try {
-              const bitmap = await createImageBitmap(frame);
-              const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-              const context = canvas.getContext("2d", { willReadFrequently: true });
+          // RGBA → base64
+          let bin = "";
+          for (let i = 0; i < buf.length; i += 8192)
+            bin += String.fromCharCode(...buf.subarray(i, i + 8192));
 
-              context.drawImage(bitmap, 0, 0);
-
-              const imageData = context.getImageData(0, 0, bitmap.width, bitmap.height);
-              const buffer = imageData.data;
-              const allocationSize = buffer.byteLength;
-              const thumbnailDataUrl = await makeThumbnailDataUrl(
-                buffer,
-                bitmap.width,
-                bitmap.height,
-              );
-              const includeRawFrame = now - lastRawSentAt >= 5000;
-
-              if (includeRawFrame) {
-                lastRawSentAt = now;
-              }
-
-              post("video-frame", {
-                streamId,
-                frameCount,
-                rawSource: "canvas.getImageData(RGBA)",
-                sourceFormat: frame.format,
-                copiedFormat: "RGBA",
-                copyToError: error.message,
-                track: summarizeTrack(track),
-                codedWidth: frame.codedWidth,
-                codedHeight: frame.codedHeight,
-                displayWidth: frame.displayWidth,
-                displayHeight: frame.displayHeight,
-                duration: frame.duration,
-                format: "RGBA",
-                timestamp: frame.timestamp,
-                allocationSize,
-                copiedBytes: allocationSize,
-                checksum: makeChecksum(buffer),
-                firstBytes: Array.from(buffer.slice(0, 24)),
-                thumbnailDataUrl,
-                rgbaDataUrl: includeRawFrame
-                  ? await blobToDataUrl(new Blob([buffer], { type: "application/octet-stream" }))
-                  : null,
-              });
-
-              bitmap.close();
-            } catch (fallbackError) {
-              post("video-frame-error", {
-                streamId,
-                track: summarizeTrack(track),
-                message: error.message,
-                fallbackMessage: fallbackError.message,
-              });
-            }
-          }
-        }
+          post("video-frame", {
+            streamId,
+            width: frame.displayWidth,
+            height: frame.displayHeight,
+            rgbaBase64: btoa(bin),
+            thumbDataUrl,
+          });
         } finally {
           frame.close();
         }
       }
-    } catch (error) {
-      post("video-reader-error", {
-        streamId,
-        track: summarizeTrack(track),
-        message: error.message,
-      });
-    }
+    })();
   };
 
-  const readAudioSamples = (stream, track, streamId) => {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  // --- WEBM: MediaRecorder, chunk mỗi 5 giây ---
+  const captureWebM = (stream, streamId) => {
+    if (!("MediaRecorder" in window)) return;
 
-    if (!AudioContextCtor) {
-      post("audio-unsupported", {
-        track: summarizeTrack(track),
-        reason: "AudioContext is not available",
-      });
-      return;
-    }
+    const mime = ["video/webm;codecs=vp9,opus", "video/webm"].find(
+      (t) => MediaRecorder.isTypeSupported(t),
+    ) || "";
 
-    // WORKAROUND CHROME BUG: Chrome có một lỗi kinh điển khiến createMediaStreamSource
-    // trả về toàn số 0 (im lặng) nếu luồng đó là remote WebRTC stream và không được
-    // gắn vào một thẻ <audio> nào đang phát. Chúng ta tạo một thẻ audio ẩn để "mồi".
-    const dummyAudio = new Audio();
-    dummyAudio.srcObject = stream;
-    dummyAudio.muted = true; // Mute để không bị vang tiếng
-    dummyAudio.play().catch(() => {});
+    const clonedTracks = stream.getTracks().map((t) => t.clone());
+    const clonedStream = new MediaStream(clonedTracks);
+    const rec = new MediaRecorder(clonedStream, mime ? { mimeType: mime } : {});
 
-    const audioContext = new AudioContextCtor();
-    // Bỏ track.clone() vì clone một remote track thường gây lỗi câm trên Chrome.
-    // Dùng trực tiếp MediaStream gốc chứa track đó.
-    const source = audioContext.createMediaStreamSource(stream);
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
-    let intervalId = null;
-    let chunkCount = 0;
-    let lastSentAt = 0;
-    let recordingSamples = [];
-    let recordingSampleRate = audioContext.sampleRate;
-    const maxRecordingSeconds = 20;
-
-    source.connect(processor);
-    processor.connect(audioContext.destination);
-
-    const cleanup = () => {
-      if (intervalId !== null) {
-        window.clearInterval(intervalId);
-      }
-      processor.disconnect();
-      source.disconnect();
-      dummyAudio.srcObject = null;
-      audioContext.close().catch(() => {});
-    };
-
-    track.addEventListener("ended", cleanup, { once: true });
-
-    // Trạng thái cho Noise Gate lúc thu
-    let envelope = 0;
-    const attack = 0.05;
-    const release = 0.001;
-    const noiseThreshold = 0.005;
-
-    processor.onaudioprocess = (event) => {
-      chunkCount += 1;
-      const now = performance.now();
-      const samples = event.inputBuffer.getChannelData(0);
-      const samplesCopy = Array.from(samples);
-
-      // --- BƯỚC 1: LUÔN LUÔN THU ÂM (LIỀN MẠCH - NGUYÊN BẢN) ---
-      if (recordingSamples.length < recordingSampleRate * maxRecordingSeconds) {
-        const remaining = recordingSampleRate * maxRecordingSeconds - recordingSamples.length;
-        // Thu trực tiếp mẫu âm thanh nguyên bản, không qua bộ lọc để đảm bảo High-Fidelity
-        recordingSamples.push(...samplesCopy.slice(0, remaining));
-      }
-
-      // --- BƯỚC 2: CHỈ GỬI THÔNG TIN PREVIEW MỖI GIÂY 1 LẦN ---
-      if (now - lastSentAt < 1000) {
-        return; // Dừng ở đây để tiết kiệm CPU, không tính toán RMS và không gửi postMessage liên tục
-      }
-      lastSentAt = now;
-
-      let peak = 0;
-      let sumSquares = 0;
-      const preview = [];
-
-      for (let index = 0; index < samples.length; index += 1) {
-        const sample = samplesCopy[index];
-        const absolute = Math.abs(sample);
-
-        if (absolute > peak) {
-          peak = absolute;
-        }
-
-        sumSquares += sample * sample;
-
-        if (index < 24) {
-          preview.push(Number(sample.toFixed(6)));
-        }
-      }
-
-      post("audio-samples", {
+    rec.ondataavailable = async (e) => {
+      if (!e.data || e.data.size === 0) return;
+      const ab = await e.data.arrayBuffer();
+      let bin = "";
+      const u8 = new Uint8Array(ab);
+      for (let i = 0; i < u8.length; i += 8192)
+        bin += String.fromCharCode(...u8.subarray(i, i + 8192));
+      post("webm-chunk", {
         streamId,
-        chunkCount,
-        track: summarizeTrack(track),
-        sampleRate: audioContext.sampleRate,
-        channels: event.inputBuffer.numberOfChannels,
-        sampleCount: samplesCopy.length,
-        rms: Number(Math.sqrt(sumSquares / samplesCopy.length).toFixed(6)),
-        peak: Number(peak.toFixed(6)),
-        firstSamples: preview,
+        mimeType: rec.mimeType,
+        dataBase64: btoa(bin),
       });
     };
 
-    intervalId = window.setInterval(() => {
-      if (recordingSamples.length === 0) return;
+    rec.start(5000);
 
-      const samplesToSend = recordingSamples;
-      recordingSamples = [];
-
-      post("audio-recording", {
-        streamId,
-        track: summarizeTrack(track),
-        sampleRate: recordingSampleRate,
-        channels: 1,
-        sampleCount: samplesToSend.length,
-        samples: samplesToSend,
-      });
-    }, 5000);
+    stream.getTracks().forEach((t) =>
+      t.addEventListener("ended", () => {
+        if (rec.state !== "inactive") rec.stop();
+        clonedTracks.forEach((ct) => ct.stop());
+      }, { once: true }),
+    );
   };
 
-  const inspectStream = (stream, constraints) => {
-    const streamId = `local-${++state.streamCount}`;
-
-    post("stream-captured", {
-      streamId,
-      constraints,
-      tracks: stream.getTracks().map(summarizeTrack),
+  // --- HOOK getUserMedia (local: video + audio student) ---
+  const origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  navigator.mediaDevices.getUserMedia = async (...args) => {
+    const stream = await origGUM(...args);
+    const id = `local-${++streamCount}`;
+    stream.getAudioTracks().forEach((t) => captureAudio(stream, t, id));
+    stream.getVideoTracks().forEach((t) => {
+      captureVideo(t, id);
+      captureWebM(new MediaStream([t]), `${id}-webm`);
     });
-
-    startMediaRecorder(stream, streamId);
-
-    for (const track of stream.getVideoTracks()) {
-      readVideoFrames(track, streamId);
-    }
-
-    for (const track of stream.getAudioTracks()) {
-      readAudioSamples(stream, track, streamId);
-    }
-  };
-
-  const mediaDevices = navigator.mediaDevices;
-
-  if (!mediaDevices || typeof mediaDevices.getUserMedia !== "function") {
-    post("hook-error", { message: "navigator.mediaDevices.getUserMedia is not available" });
-    return;
-  }
-
-  const originalGetUserMedia = mediaDevices.getUserMedia.bind(mediaDevices);
-
-  mediaDevices.getUserMedia = async (...args) => {
-    // Ép trình duyệt bật chế độ lọc tiếng ồn phần cứng/trình duyệt
-    let constraints = args[0] || {};
-    if (constraints.audio) {
-      if (typeof constraints.audio === 'boolean') {
-        constraints.audio = { noiseSuppression: true, echoCancellation: true, autoGainControl: true };
-      } else if (typeof constraints.audio === 'object') {
-        constraints.audio.noiseSuppression = true;
-        constraints.audio.echoCancellation = true;
-        constraints.audio.autoGainControl = true;
-      }
-    }
-
-    post("get-user-media-called", { constraints });
-    const stream = await originalGetUserMedia(constraints);
-    inspectStream(stream, constraints);
     return stream;
   };
 
-  const captureMentorAudio = () => {
-    const OrigPeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection;
-    if (!OrigPeerConnection) return;
+  // --- HOOK RTCPeerConnection (remote: audio mentor) ---
+  const OrigPC = window.RTCPeerConnection;
+  if (OrigPC) {
+    window.RTCPeerConnection = new Proxy(OrigPC, {
+      construct(Target, args) {
+        const pc = new Target(...args);
+        pc.addEventListener("track", (e) => {
+          if (e.track.kind !== "audio" || hookedTracks.has(e.track)) return;
+          hookedTracks.add(e.track);
+          const id = `remote-${++streamCount}`;
+          const stream = e.streams[0] || new MediaStream([e.track]);
+          captureAudio(stream, e.track, id);
+        });
+        return pc;
+      },
+    });
+  }
 
-    console.log("[MeetRawData] Hooking RTCPeerConnection constructor...");
-
-    const hookedTracks = new WeakSet();
-
-    const WrappedRTCPeerConnection = function(...args) {
-      const pc = new OrigPeerConnection(...args);
-      
-      pc.addEventListener("track", (event) => {
-        if (event.track.kind === "audio") {
-          if (hookedTracks.has(event.track)) return;
-          hookedTracks.add(event.track);
-
-          const streamId = `remote-${++state.streamCount}`;
-          const stream = event.streams[0] || new MediaStream([event.track]);
-          
-          console.log(`[MeetRawData] Remote audio track detected! streamId: ${streamId}`, event.track);
-
-          post("stream-captured", {
-            streamId,
-            constraints: { remote: true },
-            tracks: stream.getTracks().map(summarizeTrack),
-          });
-          
-          startMediaRecorder(stream, streamId);
-          readAudioSamples(stream, event.track, streamId);
-        }
-      });
-      
-      return pc;
-    };
-
-    WrappedRTCPeerConnection.prototype = OrigPeerConnection.prototype;
-    Object.assign(WrappedRTCPeerConnection, OrigPeerConnection);
-
-    window.RTCPeerConnection = WrappedRTCPeerConnection;
-    if (window.webkitRTCPeerConnection) {
-      window.webkitRTCPeerConnection = WrappedRTCPeerConnection;
-    }
-  };
-
-  // Thực thi ngay lập tức thay vì đợi DOMContentLoaded để không bỏ lỡ các PC khởi tạo sớm
-  captureMentorAudio();
-
-  post("hook-installed", {
-    userAgent: navigator.userAgent,
-    hasMediaStreamTrackProcessor: "MediaStreamTrackProcessor" in window,
-    hasVideoFrame: "VideoFrame" in window,
-    hasAudioContext: Boolean(window.AudioContext || window.webkitAudioContext),
-  });
+  post("hook-ready");
 })();

@@ -27,9 +27,9 @@ Vì vậy, máy học sinh chỉ đóng vai trò là "đường ống" truyền 
 
 ## 📊 Báo cáo tiến độ & Tình trạng dự án
 
-- **Kết quả thu thập:** Đã capture thành công raw video (student) và audio (student & mentor). Bản ghi WebM (Video) có chất lượng rất rõ nét. Phần audio từ dữ liệu thô (raw) đang được tiếp tục tinh chỉnh để đạt độ rõ tương đương.
-- **Hiệu năng & Rủi ro:** Hiện tại hệ thống hoạt động ổn định trên môi trường local. Tuy nhiên, việc lưu trữ/buffer dữ liệu lâu dài trên máy học sinh có nguy cơ gây tràn RAM hoặc lag trình duyệt do giới hạn tài nguyên.
-- **Định hướng tối ưu:** Đang nghiên cứu chuyển đổi quy trình sang định dạng **Base64** để giảm tải CPU/RAM và tiết kiệm băng thông. Việc triển khai chính thức sẽ được thực hiện ngay khi thống nhất định dạng file đầu ra cuối cùng cho hệ thống AI.
+- **Kết quả thu thập:** Đã capture thành công raw video (student) và audio (student & mentor). Bản ghi WebM (Video) có chất lượng rất rõ nét.
+- **Hiệu năng & Tối ưu hóa (Phase 0 Hotfix):** Đã hoàn tất xử lý các vấn đề tràn RAM (Memory Leak) ở cấp độ Extension (bằng cách chặn việc sao chép media raw vào `chrome.storage`). Đồng thời, payload của Audio Float32 đã được mã hóa **Base64 binary** trực tiếp ngay tại nguồn, làm giảm ~65% dung lượng truyền tải và triệt tiêu hoàn toàn CPU spike do xử lý chuỗi JSON số dài.
+- **Định hướng tiếp theo:** Chuẩn bị nâng cấp toàn diện sang **AudioWorklet** (tự động downsample xuống 16kHz tại client) và thay đổi giao thức gửi dữ liệu sang **WebSocket**.
 
 ## 🚀 Hướng dẫn sử dụng
 

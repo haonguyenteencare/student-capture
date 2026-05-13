@@ -1,31 +1,72 @@
-const eventsElement = document.querySelector("#events");
-const statusElement = document.querySelector("#status");
-const clearButton = document.querySelector("#clear");
-const exportButton = document.querySelector("#export");
-const viewerButton = document.querySelector("#viewer");
-const studentIdInput = document.querySelector("#studentIdInput");
-const saveIdentityButton = document.querySelector("#saveIdentity");
-const identityStatus = document.querySelector("#identityStatus");
+const eventsEl       = document.getElementById("events");
+const statusEl       = document.getElementById("status");
+const serverStatusEl = document.getElementById("serverStatus");
+const queueBadgeEl   = document.getElementById("queueBadge");
+const offlineWarning = document.getElementById("offline-warning");
+const clearBtn       = document.getElementById("clear");
+const exportBtn      = document.getElementById("export");
+const viewerBtn      = document.getElementById("viewer");
+const studentIdInput = document.getElementById("studentIdInput");
+const saveIdentityBtn= document.getElementById("saveIdentity");
+const identityStatus = document.getElementById("identityStatus");
 
+const API      = "http://localhost:8787";
+const DB_NAME  = "meet-poc-buffer";
+const DB_VERSION = 1;
+
+// ── Online / Offline indicator ────────────────────────────────────────────────
+window.addEventListener("offline", () => { offlineWarning.style.display = "flex"; });
+window.addEventListener("online",  () => { offlineWarning.style.display = "none"; });
+if (!navigator.onLine) offlineWarning.style.display = "flex";
+
+// ── Server ping ───────────────────────────────────────────────────────────────
+async function checkServer() {
+  try {
+    await fetch(`${API}/api/ping`, { signal: AbortSignal.timeout(2000) });
+    serverStatusEl.textContent = "✅ Server đang hoạt động";
+    serverStatusEl.style.color = "#4ade80";
+  } catch {
+    serverStatusEl.textContent = "❌ Server không kết nối được";
+    serverStatusEl.style.color = "#f87171";
+  }
+}
+
+// ── IndexedDB queue count ─────────────────────────────────────────────────────
+async function countQueue() {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = (e) =>
+        e.target.result.createObjectStore("chunks", { keyPath: "id", autoIncrement: true });
+      req.onsuccess = (e) => resolve(e.target.result);
+      req.onerror   = () => reject(req.error);
+    });
+    const count = await new Promise((resolve, reject) => {
+      const req = db.transaction("chunks", "readonly").objectStore("chunks").count();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror   = () => reject(req.error);
+    });
+    if (count > 0) {
+      queueBadgeEl.textContent = `${count} chunk chờ gửi`;
+      queueBadgeEl.style.display = "inline";
+    } else {
+      queueBadgeEl.style.display = "none";
+    }
+  } catch { /* ignore */ }
+}
+
+// ── Events từ storage (events nhỏ không có media) ────────────────────────────
 const summarizeEvent = (event) => {
-  if (event.type === "video-frame") {
-    return `Video frame ${event.payload.displayWidth}x${event.payload.displayHeight}, ${event.payload.format}, checksum ${event.payload.checksum}`;
-  }
-
-  if (event.type === "audio-samples") {
-    return `Audio samples ${event.payload.sampleCount} @ ${event.payload.sampleRate}Hz, peak ${event.payload.peak}`;
-  }
-
-  if (event.type === "stream-captured") {
-    return `Captured ${event.payload.tracks.length} local track(s)`;
-  }
-
+  if (event.type === "audio-chunk")  return `Audio chunk — ${event.payload?.sampleCount ?? "?"} samples @ ${event.payload?.sampleRate ?? "?"}Hz`;
+  if (event.type === "video-frame")  return `Video frame — ${event.payload?.width}×${event.payload?.height}`;
+  if (event.type === "webm-chunk")   return `WebM chunk`;
+  if (event.type === "hook-ready")   return "Hook installed ✓";
   return event.type;
 };
 
-const render = async () => {
-  const { events = [] } = await chrome.storage.local.get({ events: [] });
-  const { studentId } = await chrome.storage.local.get({ studentId: null });
+const renderEvents = async () => {
+  const { events = [] } = await chrome.storage.local.get({ events: [] }).catch(() => ({ events: [] }));
+  const { studentId }   = await chrome.storage.local.get({ studentId: null }).catch(() => ({}));
 
   if (studentId) {
     studentIdInput.value = studentId;
@@ -33,95 +74,78 @@ const render = async () => {
       identityStatus.textContent = "Đang dùng ID ẩn danh. Hãy cập nhật ID thật.";
       identityStatus.style.color = "#fbbf24";
     } else {
-      identityStatus.textContent = "Danh tính đã được xác nhận: " + studentId;
+      identityStatus.textContent = "Danh tính: " + studentId;
       identityStatus.style.color = "#4ade80";
     }
   }
 
-  statusElement.textContent = events.length
+  statusEl.textContent = events.length
     ? summarizeEvent(events[0])
-    : "Open Google Meet, allow camera/mic, then open this popup again.";
+    : "Mở Google Meet, cho phép camera/mic, rồi mở lại popup này.";
 
-  eventsElement.textContent = "";
-
+  eventsEl.textContent = "";
   for (const event of events) {
-    const row = document.createElement("article");
+    const row   = document.createElement("article");
     row.className = "event";
-
     const title = document.createElement("div");
     title.className = "event-title";
-
-    const type = document.createElement("span");
+    const type  = document.createElement("span");
     type.textContent = event.type;
-
-    const time = document.createElement("span");
+    const time  = document.createElement("span");
     time.className = "time";
     time.textContent = new Date(event.at).toLocaleTimeString();
-
-    const payload = document.createElement("pre");
-    const payloadForDisplay = { ...event.payload };
-    const thumbnailDataUrl = payloadForDisplay.thumbnailDataUrl;
-
-    delete payloadForDisplay.thumbnailDataUrl;
-    delete payloadForDisplay.dataUrl;
-    delete payloadForDisplay.rgbaDataUrl;
-    delete payloadForDisplay.samples;
-
-    payload.textContent = JSON.stringify(payloadForDisplay, null, 2);
-
     title.append(type, time);
     row.append(title);
 
-    if (thumbnailDataUrl) {
-      const image = document.createElement("img");
-      image.className = "thumbnail";
-      image.src = thumbnailDataUrl;
-      image.alt = "Video frame preview";
-      row.append(image);
+    if (event.payload?.thumbDataUrl) {
+      const img = document.createElement("img");
+      img.className = "thumbnail";
+      img.src = event.payload.thumbDataUrl;
+      row.append(img);
     }
 
-    row.append(payload);
-    eventsElement.append(row);
+    const pre = document.createElement("pre");
+    const display = { ...event.payload };
+    delete display.thumbDataUrl;
+    delete display.rgbaBase64;
+    delete display.dataBase64;
+    pre.textContent = JSON.stringify(display, null, 2);
+    row.append(pre);
+    eventsEl.append(row);
   }
 };
 
-clearButton.addEventListener("click", async () => {
-  await chrome.storage.local.set({ events: [] });
-  await render();
+// ── Buttons ───────────────────────────────────────────────────────────────────
+clearBtn.addEventListener("click", async () => {
+  await chrome.storage.local.set({ events: [] }).catch(() => {});
+  renderEvents();
 });
 
-exportButton.addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  if (!tab?.id) {
-    statusElement.textContent = "No active Meet tab found.";
-    return;
-  }
-
-  const result = await chrome.runtime.sendMessage({ type: "export-session", tabId: tab.id });
-
-  statusElement.textContent = result.ok
-    ? `Downloaded ${result.filename} with ${result.eventCount} event(s).`
-    : `Export failed: ${result.reason}`;
+exportBtn.addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+  if (!tab?.id) { statusEl.textContent = "Không tìm thấy tab Meet."; return; }
+  const result = await chrome.runtime.sendMessage({ type: "export-session", tabId: tab.id }).catch(() => ({ ok: false }));
+  statusEl.textContent = result?.ok
+    ? `Đã export: ${result.filename}`
+    : "Export thất bại.";
 });
 
-viewerButton.addEventListener("click", async () => {
-  await chrome.tabs.create({ url: chrome.runtime.getURL("viewer.html") });
+viewerBtn.addEventListener("click", () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL("viewer.html") });
 });
 
-saveIdentityButton.addEventListener("click", async () => {
+saveIdentityBtn.addEventListener("click", async () => {
   const newId = studentIdInput.value.trim();
   if (!newId) return;
-
-  await chrome.storage.local.set({ studentId: newId });
-  await chrome.runtime.sendMessage({ type: "identity-updated", studentId: newId });
-  await render();
+  await chrome.storage.local.set({ studentId: newId }).catch(() => {});
+  await chrome.runtime.sendMessage({ type: "identity-updated", studentId: newId }).catch(() => {});
+  renderEvents();
 });
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === "local" && changes.events) {
-    render().catch(() => {});
-  }
-});
+// ── Refresh ───────────────────────────────────────────────────────────────────
+async function refresh() {
+  await Promise.all([checkServer(), countQueue(), renderEvents()]);
+}
 
-render().catch(() => {});
+refresh();
+setInterval(refresh, 3000);

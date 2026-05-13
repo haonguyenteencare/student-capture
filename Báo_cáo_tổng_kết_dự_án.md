@@ -18,28 +18,28 @@ Dự án nhằm xây dựng một hệ thống mở rộng trình duyệt (Chrom
 
 ## 3. Kiến trúc kỹ thuật & Tối ưu hóa
 
-### Cơ chế Streaming Batch Upload
-Thay vì lưu trữ tạm trên trình duyệt (gây nặng máy), hệ thống sử dụng cơ chế **đẩy dữ liệu liên tục về Server nội bộ mỗi 5 giây**. Điều này giúp giải quyết các nhược điểm chí mạng của việc lưu trữ tại trình duyệt:
-- **Tránh tràn RAM:** Không gây lỗi "Aw, Snap!" do tích tụ dữ liệu media nặng.
-- **Giảm nghẽn Disk I/O:** Không làm đơ máy học sinh (đặc biệt các máy dùng ổ HDD/eMMC cũ).
-- **An toàn dữ liệu:** Dữ liệu được bảo vệ tại Server, tránh việc bị trình duyệt tự động xóa (evict) khi hết dung lượng.
+### Cơ chế Streaming Batch Upload (Đã tối ưu Pipeline)
+Thay vì lưu trữ tạm trên trình duyệt (gây nặng máy), hệ thống sử dụng cơ chế **đẩy dữ liệu liên tục về Server nội bộ mỗi 5-10 giây**. Hiện tại, dữ liệu Media nặng đã được tách biệt thành luồng riêng:
+- **Audio F32:** Mã hóa sang chuỗi Base64 nhị phân (giảm ~65% dung lượng truyền tải so với JSON array).
+- **Video RGBA & WebM:** Truyền tải base64 qua kênh song song, giảm tần suất RGBA xuống 10s/lần.
+- **Tránh tràn RAM:** Đã chặn rò rỉ bộ nhớ ở Service Worker và Content Script, không lưu các mảng media khổng lồ vào RAM hay Disk nội bộ của máy học sinh.
 
 ### Xử lý âm thanh 3 lớp
 1. **Lớp trình duyệt:** Ép bật khử nhiễu và cân bằng âm lượng phần cứng.
 2. **Lớp Extension:** Thu âm raw không nén để giữ độ chi tiết cao nhất.
 3. **Lớp Server:** Áp dụng thuật toán Noise Gate (tấn công nhanh) để lọc tiếng xì nền và chuẩn hóa âm lượng (Normalize).
 
-## 4. Đánh giá hiệu năng & Rủi ro vận hành
+## 4. Đánh giá hiệu năng & Tối ưu hóa (Cập nhật)
 
-- **Hiệu năng:** Hiện tại hệ thống đã hoạt động ổn định trên môi trường kiểm thử. Tuy nhiên, khi vận hành thực tế trên các máy tính cấu hình yếu của học sinh trong thời gian dài (>60 phút), vẫn cần giám sát chặt chẽ mức độ chiếm dụng tài nguyên.
-- **Rủi ro:** Duy trì ghi dữ liệu liên tục có thể dẫn đến lag nhẹ nếu CPU máy học sinh quá yếu. Việc tối ưu hóa bằng định dạng Base64 đang được xem xét để giảm tải thêm.
+- **Hiệu năng:** Hệ thống vừa hoàn tất đợt **Hotfix khẩn cấp (Phase 0)**. Các lỗi về rò rỉ RAM ở Service Worker và CPU spike do ép kiểu Audio Float32 thành JSON string đã được loại bỏ hoàn toàn.
+- **Kết quả:** Payload của Audio gửi về Server đã giảm hơn 3 lần, và thời gian Serialize JSON gần như bằng 0.
 
-## 5. Hướng phát triển & Đề xuất tiếp theo
+## 5. Hướng phát triển & Đề xuất tiếp theo (Phase 1 & 2)
 
-- **Tối ưu hóa dữ liệu:** Nghiên cứu chuyển đổi quy trình truyền tải sang định dạng **Base64**. Phương pháp này giúp việc đóng gói gửi về server nhẹ nhàng hơn, giảm áp lực lên RAM và CPU. (Hiện đang chờ xác nhận định dạng đầu ra cuối cùng để triển khai).
-- **Kiểm thử áp lực (Stress Test):** Thực hiện đánh giá trên quy mô 40 máy chạy đồng thời để xác định ngưỡng giới hạn của Server.
-- **Cải thiện Audio:** Tiếp tục tinh chỉnh thuật toán lọc nhiễu cho luồng Raw Audio để đạt chất lượng tương đương với bản ghi WebM nén.
+- **Tối ưu hóa Audio Pipeline:** Chuyển dịch từ `ScriptProcessorNode` (main thread) sang **AudioWorklet** với tính năng tự động Downsample xuống 16kHz (tiết kiệm thêm 66% băng thông).
+- **Phát hiện giọng nói (VAD):** Tích hợp thuật toán chặn các đoạn silence (im lặng) không cần thiết để gửi lên Server.
+- **Thay đổi Giao thức Truyền tải:** Chuyển từ HTTP POST sang **WebSocket (Binary)** kết hợp MessagePack để loại bỏ hoàn toàn overhead của HTTP header và Base64 encoding.
 
 ---
-*Ngày báo cáo: 12/05/2026*
-*Trạng thái: Đã bàn giao mã nguồn và tài liệu hướng dẫn.*
+*Ngày báo cáo: 13/05/2026 (Cập nhật Hotfix Phase 0)*
+*Trạng thái: Đã fix lỗi Memory Leak & CPU Spike. Chuẩn bị triển khai AudioWorklet.*
