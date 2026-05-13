@@ -11,7 +11,8 @@
       <h1>🎙 Meet Raw Data PoC</h1>
       <div class="actions">
         <button id="viewer" type="button">Viewer</button>
-        <button id="export" type="button">Export</button>
+        <!-- ❌ DISABLED: background.js chưa có handler export-session -->
+        <!-- <button id="export" type="button">Export</button> -->
         <button id="clear" type="button">Clear</button>
       </div>
     </header>
@@ -23,7 +24,8 @@
 
     <!-- Trạng thái server + queue -->
     <div class="status-row">
-      <span id="serverStatus">🔄 Đang kiểm tra server...</span>
+      <!-- ❌ DISABLED: server.js chưa có /api/ping -->
+      <!-- <span id="serverStatus">🔄 Đang kiểm tra server...</span> -->
       <span id="queueBadge" class="badge" style="display:none;"></span>
     </div>
 
