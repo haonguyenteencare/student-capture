@@ -125,13 +125,13 @@ async function convertAudio() {
 async function processDirectory(dir, outputPrefix) {
   try {
     const files = await fs.readdir(dir);
-    const f32Files = files.filter(f => f.endsWith(".f32") && !f.includes("full_audio")).sort();
+    const audioFiles = files.filter(f => (f.endsWith(".f32") || f.endsWith(".bin")) && !f.includes("full_audio")).sort();
 
-    if (f32Files.length === 0) return;
+    if (audioFiles.length === 0) return;
 
     // Phân nhóm theo Loại (local/remote) thay vì streamId chi tiết để gom chung Mentor/Student
     const streams = {};
-    for (const file of f32Files) {
+    for (const file of audioFiles) {
       const parts = file.split("-");
       if (parts.length >= 4) {
         const type = parts[1]; // "local" hoặc "remote"
@@ -151,20 +151,31 @@ async function processDirectory(dir, outputPrefix) {
       const buffers = [];
 
       for (const file of chunks) {
-        const baseName = file.replace(".f32", "");
+        const baseName = file.replace(/\.(f32|bin)$/, "");
         const jsonFile = baseName + ".json";
         
         try {
-          if (totalLength === 0) {
-            const jsonContent = JSON.parse(await fs.readFile(path.join(dir, jsonFile), "utf8"));
-            if (jsonContent.sampleRate) sampleRate = jsonContent.sampleRate;
+          let encoding = "f32le";
+          const jsonContent = JSON.parse(await fs.readFile(path.join(dir, jsonFile), "utf8"));
+          if (jsonContent.sampleRate) sampleRate = jsonContent.sampleRate;
+          if (jsonContent.encoding) encoding = jsonContent.encoding;
+          
+          const fileBuffer = await fs.readFile(path.join(dir, file));
+          let float32Array;
+          
+          if (encoding === "i16le") {
+            const int16Array = new Int16Array(fileBuffer.buffer, fileBuffer.byteOffset, fileBuffer.byteLength / 2);
+            float32Array = new Float32Array(int16Array.length);
+            for(let i=0; i<int16Array.length; i++) {
+              float32Array[i] = int16Array[i] / 32768.0;
+            }
+          } else {
+            float32Array = new Float32Array(fileBuffer.length / 4);
+            for(let i=0; i<float32Array.length; i++) {
+              float32Array[i] = fileBuffer.readFloatLE(i * 4);
+            }
           }
           
-          const f32Buffer = await fs.readFile(path.join(dir, file));
-          const float32Array = new Float32Array(f32Buffer.length / 4);
-          for(let i=0; i<float32Array.length; i++) {
-            float32Array[i] = f32Buffer.readFloatLE(i * 4);
-          }
           buffers.push(float32Array);
           totalLength += float32Array.length;
         } catch (err) {

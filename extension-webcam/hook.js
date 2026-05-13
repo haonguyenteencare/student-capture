@@ -62,15 +62,14 @@
 
     const sourceCanvas = new OffscreenCanvas(width, height);
     const sourceContext = sourceCanvas.getContext("2d");
-    const thumbnailWidth = 240;
-    const thumbnailHeight = Math.max(1, Math.round((height / width) * thumbnailWidth));
-    const thumbnailCanvas = new OffscreenCanvas(thumbnailWidth, thumbnailHeight);
-    const thumbnailContext = thumbnailCanvas.getContext("2d");
 
-    sourceContext.putImageData(new ImageData(new Uint8ClampedArray(rgbaBytes), width, height), 0, 0);
-    thumbnailContext.drawImage(sourceCanvas, 0, 0, thumbnailWidth, thumbnailHeight);
+    sourceContext.putImageData(
+      new ImageData(new Uint8ClampedArray(rgbaBytes), width, height),
+      0,
+      0,
+    );
 
-    const blob = await thumbnailCanvas.convertToBlob({ type: "image/jpeg", quality: 0.72 });
+    const blob = await sourceCanvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
 
     return blobToDataUrl(blob);
   };
@@ -188,7 +187,7 @@
         const now = performance.now();
 
         try {
-          if (now - lastSentAt >= 1000) {
+          if (now - lastSentAt >= 3000) {
             lastSentAt = now;
 
             try {
@@ -201,7 +200,7 @@
               frame.displayWidth,
               frame.displayHeight,
             );
-            const includeRawFrame = now - lastRawSentAt >= 5000;
+            const includeRawFrame = now - lastRawSentAt >= 10000;
 
             if (includeRawFrame) {
               lastRawSentAt = now;
@@ -247,7 +246,7 @@
                 bitmap.width,
                 bitmap.height,
               );
-              const includeRawFrame = now - lastRawSentAt >= 5000;
+              const includeRawFrame = now - lastRawSentAt >= 10000;
 
               if (includeRawFrame) {
                 lastRawSentAt = now;
@@ -302,7 +301,7 @@
     }
   };
 
-  const readAudioSamples = (stream, track, streamId) => {
+  const readAudioSamples = async (stream, track, streamId) => {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 
     if (!AudioContextCtor) {
@@ -322,104 +321,79 @@
     dummyAudio.play().catch(() => {});
 
     const audioContext = new AudioContextCtor();
-    // Bỏ track.clone() vì clone một remote track thường gây lỗi câm trên Chrome.
-    // Dùng trực tiếp MediaStream gốc chứa track đó.
     const source = audioContext.createMediaStreamSource(stream);
-    const processor = audioContext.createScriptProcessor(4096, 1, 1);
-    let intervalId = null;
-    let chunkCount = 0;
-    let lastSentAt = 0;
-    let recordingSamples = [];
-    let recordingSampleRate = audioContext.sampleRate;
-    const maxRecordingSeconds = 20;
+    
+    let previewIntervalId = null;
+
+    try {
+      if (!window.TEENCARE_WORKLET_URL) {
+        throw new Error("Missing TEENCARE_WORKLET_URL");
+      }
+      await audioContext.audioWorklet.addModule(window.TEENCARE_WORKLET_URL);
+    } catch (err) {
+      console.error("[MeetRawData] Failed to load AudioWorklet", err);
+      return;
+    }
+
+    const processor = new AudioWorkletNode(audioContext, "audio-processor");
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
 
     source.connect(processor);
+    source.connect(analyser);
     processor.connect(audioContext.destination);
 
     const cleanup = () => {
-      if (intervalId !== null) {
-        window.clearInterval(intervalId);
+      if (previewIntervalId !== null) {
+        window.clearInterval(previewIntervalId);
       }
       processor.disconnect();
       source.disconnect();
-      dummyAudio.srcObject = null;
+      if (dummyAudio.srcObject) {
+        dummyAudio.pause();
+        dummyAudio.srcObject = null;
+      }
       audioContext.close().catch(() => {});
     };
 
     track.addEventListener("ended", cleanup, { once: true });
 
-    // Trạng thái cho Noise Gate lúc thu
-    let envelope = 0;
-    const attack = 0.05;
-    const release = 0.001;
-    const noiseThreshold = 0.005;
-
-    processor.onaudioprocess = (event) => {
-      chunkCount += 1;
-      const now = performance.now();
-      const samples = event.inputBuffer.getChannelData(0);
-      const samplesCopy = Array.from(samples);
-
-      // --- BƯỚC 1: LUÔN LUÔN THU ÂM (LIỀN MẠCH - NGUYÊN BẢN) ---
-      if (recordingSamples.length < recordingSampleRate * maxRecordingSeconds) {
-        const remaining = recordingSampleRate * maxRecordingSeconds - recordingSamples.length;
-        // Thu trực tiếp mẫu âm thanh nguyên bản, không qua bộ lọc để đảm bảo High-Fidelity
-        recordingSamples.push(...samplesCopy.slice(0, remaining));
-      }
-
-      // --- BƯỚC 2: CHỈ GỬI THÔNG TIN PREVIEW MỖI GIÂY 1 LẦN ---
-      if (now - lastSentAt < 1000) {
-        return; // Dừng ở đây để tiết kiệm CPU, không tính toán RMS và không gửi postMessage liên tục
-      }
-      lastSentAt = now;
-
-      let peak = 0;
-      let sumSquares = 0;
-      const preview = [];
-
-      for (let index = 0; index < samples.length; index += 1) {
-        const sample = samplesCopy[index];
-        const absolute = Math.abs(sample);
-
-        if (absolute > peak) {
-          peak = absolute;
-        }
-
-        sumSquares += sample * sample;
-
-        if (index < 24) {
-          preview.push(Number(sample.toFixed(6)));
-        }
-      }
-
-      post("audio-samples", {
-        streamId,
-        chunkCount,
-        track: summarizeTrack(track),
-        sampleRate: audioContext.sampleRate,
-        channels: event.inputBuffer.numberOfChannels,
-        sampleCount: samplesCopy.length,
-        rms: Number(Math.sqrt(sumSquares / samplesCopy.length).toFixed(6)),
-        peak: Number(peak.toFixed(6)),
-        firstSamples: preview,
-      });
-    };
-
-    intervalId = window.setInterval(() => {
-      if (recordingSamples.length === 0) return;
-
-      const samplesToSend = recordingSamples;
-      recordingSamples = [];
+    processor.port.onmessage = (event) => {
+      const int16Buffer = event.data;
+      const uint8 = new Uint8Array(int16Buffer);
 
       post("audio-recording", {
         streamId,
         track: summarizeTrack(track),
-        sampleRate: recordingSampleRate,
+        sampleRate: 16000,
         channels: 1,
-        sampleCount: samplesToSend.length,
-        samples: samplesToSend,
+        sampleCount: int16Buffer.byteLength / 2,
+        encoding: "i16le",
+        dataBuffer: uint8,
       });
-    }, 5000);
+    };
+
+    previewIntervalId = window.setInterval(() => {
+      const dataArray = new Float32Array(analyser.fftSize);
+      analyser.getFloatTimeDomainData(dataArray);
+      let peak = 0;
+      let sumSquares = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        const val = Math.abs(dataArray[i]);
+        if (val > peak) peak = val;
+        sumSquares += val * val;
+      }
+      post("audio-samples", {
+        streamId,
+        track: summarizeTrack(track),
+        sampleRate: audioContext.sampleRate,
+        channels: 1,
+        sampleCount: 0,
+        rms: Number(Math.sqrt(sumSquares / dataArray.length).toFixed(6)),
+        peak: Number(peak.toFixed(6)),
+        firstSamples: Array.from(dataArray.slice(0, 24)).map((n) => Number(n.toFixed(6))),
+      });
+    }, 1000);
   };
 
   const inspectStream = (stream, constraints) => {
@@ -478,39 +452,37 @@
 
     const hookedTracks = new WeakSet();
 
-    const WrappedRTCPeerConnection = function(...args) {
-      const pc = new OrigPeerConnection(...args);
-      
-      pc.addEventListener("track", (event) => {
-        if (event.track.kind === "audio") {
-          if (hookedTracks.has(event.track)) return;
-          hookedTracks.add(event.track);
+    window.RTCPeerConnection = new Proxy(OrigPeerConnection, {
+      construct(target, args) {
+        const pc = new target(...args);
+        
+        pc.addEventListener("track", (event) => {
+          if (event.track.kind === "audio") {
+            if (hookedTracks.has(event.track)) return;
+            hookedTracks.add(event.track);
 
-          const streamId = `remote-${++state.streamCount}`;
-          const stream = event.streams[0] || new MediaStream([event.track]);
-          
-          console.log(`[MeetRawData] Remote audio track detected! streamId: ${streamId}`, event.track);
+            const streamId = `remote-${++state.streamCount}`;
+            const stream = event.streams[0] || new MediaStream([event.track]);
+            
+            console.log(`[MeetRawData] Remote audio track detected! streamId: ${streamId}`, event.track);
 
-          post("stream-captured", {
-            streamId,
-            constraints: { remote: true },
-            tracks: stream.getTracks().map(summarizeTrack),
-          });
-          
-          startMediaRecorder(stream, streamId);
-          readAudioSamples(stream, event.track, streamId);
-        }
-      });
-      
-      return pc;
-    };
+            post("stream-captured", {
+              streamId,
+              constraints: { remote: true },
+              tracks: stream.getTracks().map(summarizeTrack),
+            });
+            
+            startMediaRecorder(stream, streamId);
+            readAudioSamples(stream, event.track, streamId);
+          }
+        });
+        
+        return pc;
+      }
+    });
 
-    WrappedRTCPeerConnection.prototype = OrigPeerConnection.prototype;
-    Object.assign(WrappedRTCPeerConnection, OrigPeerConnection);
-
-    window.RTCPeerConnection = WrappedRTCPeerConnection;
     if (window.webkitRTCPeerConnection) {
-      window.webkitRTCPeerConnection = WrappedRTCPeerConnection;
+      window.webkitRTCPeerConnection = window.RTCPeerConnection;
     }
   };
 

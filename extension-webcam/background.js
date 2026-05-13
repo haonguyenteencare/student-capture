@@ -1,4 +1,6 @@
-const API_BASE_URL = "http://localhost:8787";
+importScripts("msgpack.min.js");
+
+const API_BASE_URL = "ws://localhost:8787";
 const UPLOAD_INTERVAL_AUDIO_MS = 5000;
 const UPLOAD_INTERVAL_VIDEO_MS = 15000;
 const MAX_BATCH_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
@@ -94,7 +96,7 @@ const getSession = async (tabId, pageUrl) => {
         "PoC capture file. Video frames are sampled RGBA previews, not continuous full raw video.",
         "Audio samples are sampled Float32 preview chunks, not continuous full PCM recording.",
       ],
-      events: [],
+      eventCount: 0,
       upload: {
         apiBaseUrl: API_BASE_URL,
         lastAttemptAt: null,
@@ -115,8 +117,6 @@ const getSession = async (tabId, pageUrl) => {
   return session;
 };
 
-const getPayloadForExport = (event) => event;
-
 const getPayloadForUpload = (event) => {
   if (event.type !== "audio-samples") {
     return event;
@@ -132,7 +132,7 @@ const getPayloadForUpload = (event) => {
 };
 
 const downloadJson = async (session) => {
-  if (!session || session.events.length === 0) {
+  if (!session || session.eventCount === 0) {
     return { ok: false, reason: "No captured events for this tab yet." };
   }
 
@@ -141,24 +141,69 @@ const downloadJson = async (session) => {
     ...session,
     endedAt,
     exportedAt: endedAt,
-    eventCount: session.events.length,
   };
   const json = JSON.stringify(payload, null, 2);
   const dataUrl = `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
 
   await chrome.downloads.download({
     url: dataUrl,
-    filename: `${session.id}.json`,
+    filename: `${session.id}-metadata.json`,
     saveAs: false,
   });
 
-  return { ok: true, filename: `${session.id}.json`, eventCount: session.events.length };
+  return { ok: true, filename: `${session.id}-metadata.json`, eventCount: session.eventCount };
 };
 
 const queueUpload = async (tabId, event) => {
   const eventId = `event_${tabId}_${Date.now()}_${uuid()}`;
   await chrome.storage.local.set({ [eventId]: event });
 };
+
+let ws = null;
+let offlineQueue = [];
+let pingInterval = null;
+
+const ensureWsConnection = () => {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  
+  ws = new WebSocket(API_BASE_URL);
+  
+  ws.onopen = () => {
+    console.log("WebSocket connected");
+    if (pingInterval) clearInterval(pingInterval);
+    pingInterval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+    }, 20000);
+    
+    while (offlineQueue.length > 0) {
+      const payload = offlineQueue.shift();
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(MessagePack.encode(payload));
+        } catch (e) {
+          console.error("Failed to encode/send queued payload", e);
+        }
+      } else {
+        offlineQueue.unshift(payload);
+        break;
+      }
+    }
+  };
+  
+  ws.onclose = () => {
+    console.log("WebSocket closed");
+    if (pingInterval) clearInterval(pingInterval);
+    setTimeout(ensureWsConnection, 5000);
+  };
+  
+  ws.onerror = (err) => {
+    console.error("WebSocket error", err);
+  };
+};
+
+ensureWsConnection();
 
 const activeUploads = new Set();
 
@@ -188,8 +233,8 @@ const uploadBatch = async (tabId, filterTypes = "all") => {
       if (filterTypes === "video" && !isVideoOrMedia) continue;
 
       const payload = getPayloadForUpload(event);
-      const jsonStr = JSON.stringify(payload);
-      const itemSize = jsonStr.length;
+      // Giả định mỗi event trung bình tốn size bytes để tránh buffer quá bự
+      const itemSize = payload.dataBase64 ? payload.dataBase64.length : 1000;
 
       if (currentBatchSize + itemSize > MAX_BATCH_SIZE_BYTES && events.length > 0) {
         remainingKeysOfSameFilterType++;
@@ -218,33 +263,27 @@ const uploadBatch = async (tabId, filterTypes = "all") => {
       session.upload.lastAttemptAt = new Date().toISOString();
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    const wsPayload = {
+      meetingId: session.meetingId,
+      studentId: session.studentId,
+      sessionId: session.sessionId,
+      pageUrl: session.pageUrl,
+      userAgent: navigator.userAgent,
+      events: events,
+    };
 
-    const response = await fetch(`${API_BASE_URL}/api/capture/batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller.signal,
-      body: JSON.stringify({
-        meetingId: session.meetingId,
-        studentId: session.studentId,
-        sessionId: session.sessionId,
-        pageUrl: session.pageUrl,
-        userAgent: navigator.userAgent,
-        events: events,
-      }),
-    });
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(MessagePack.encode(wsPayload));
+    } else {
+      offlineQueue.push(wsPayload);
+    }
 
-    clearTimeout(timeoutId);
-
-    if (!response.ok) throw new Error(`API responded ${response.status}`);
-    const result = await response.json();
     await chrome.storage.local.remove(keysToDelete);
 
     if (session.upload) {
       session.upload.lastSuccessAt = new Date().toISOString();
       session.upload.lastError = null;
-      session.upload.uploadedEventCount += result.savedEventCount || events.length;
+      session.upload.uploadedEventCount += events.length;
     }
 
     if (remainingKeysOfSameFilterType > 0) {
@@ -313,12 +352,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sessionId: session.sessionId,
         };
 
-        session.events.push(getPayloadForExport(event));
+        session.eventCount = (session.eventCount || 0) + 1;
         await queueUpload(sender.tab.id, event);
         sendResponse({
           ok: true,
           recorded: true,
-          eventCount: session.events.length,
+          eventCount: session.eventCount,
           meetingId: session.meetingId,
           studentId: session.studentId,
           sessionId: session.sessionId,
@@ -351,7 +390,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "session-ended" && sender.tab?.id !== undefined) {
     const session = sessions.get(sender.tab.id);
 
-    if (session && session.events.length > 0) {
+    if (session && session.eventCount > 0) {
       session.endedAt = new Date().toISOString();
       uploadBatch(sender.tab.id, "all").catch(() => {});
       downloadJson(session).catch(() => {});

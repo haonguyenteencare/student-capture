@@ -3,6 +3,8 @@ import express from "express";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
+import { decode } from "@msgpack/msgpack";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,6 +61,19 @@ const decodeNumberArray = (values, bytesPerValue) => {
   }
 
   return Buffer.from(values.map((value) => Number(value) || 0));
+};
+
+const decodeAudioData = (payload) => {
+  if (payload.dataBuffer) {
+    return Buffer.from(payload.dataBuffer);
+  }
+  if (payload.dataBase64) {
+    return Buffer.from(payload.dataBase64, "base64");
+  }
+  if (Array.isArray(payload.samples)) {
+    return decodeNumberArray(payload.samples, 4);
+  }
+  return Buffer.alloc(0);
 };
 
 const readManifest = async (manifestPath) => {
@@ -153,18 +168,20 @@ const saveEvent = async (sessionDir, event, index) => {
     await mkdir(audioDir, { recursive: true });
 
     const samplesPath = path.join(audioDir, `${baseName}.json`);
-    const float32Path = path.join(audioDir, `${baseName}.f32`);
+    const binPath = path.join(audioDir, `${baseName}.bin`);
 
     await writeJson(samplesPath, {
       sampleRate: payload.sampleRate,
       channels: payload.channels,
       sampleCount: payload.sampleCount,
-      samples: payload.samples || [],
+      encoding: payload.encoding,
     });
-    await writeFile(float32Path, decodeNumberArray(payload.samples, 4));
+
+    const buffer = decodeAudioData(payload);
+    await writeFile(binPath, buffer);
 
     saved.files.samples = path.relative(sessionDir, samplesPath);
-    saved.files.float32 = path.relative(sessionDir, float32Path);
+    saved.files.bin = path.relative(sessionDir, binPath);
     saved.metadata = {
       sampleRate: payload.sampleRate,
       channels: payload.channels,
@@ -339,7 +356,54 @@ app.use((error, _request, response, _next) => {
 
 await mkdir(capturesRoot, { recursive: true });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Meet capture API listening on http://localhost:${port}`);
   console.log(`Captures root: ${capturesRoot}`);
+});
+
+const wss = new WebSocketServer({ server });
+
+wss.on("connection", (ws) => {
+  console.log("WebSocket client connected");
+  
+  ws.on("message", async (data, isBinary) => {
+    try {
+      if (!isBinary) {
+        const text = data.toString();
+        if (text === "ping") {
+          ws.send("pong");
+        }
+        return;
+      }
+      
+      const payload = decode(data);
+      const meetingId = sanitizeSegment(payload.meetingId, "unknown-meeting");
+      const studentId = sanitizeSegment(payload.studentId, "unknown-student");
+      const sessionId = sanitizeSegment(payload.sessionId, "unknown-session");
+      const events = Array.isArray(payload.events) ? payload.events : [];
+      const sessionDir = path.join(capturesRoot, meetingId, studentId, sessionId);
+
+      await mkdir(sessionDir, { recursive: true });
+      const savedEvents = [];
+      for (let index = 0; index < events.length; index += 1) {
+        savedEvents.push(await saveEvent(sessionDir, events[index], index));
+      }
+
+      await appendManifestEvents(
+        sessionDir,
+        {
+          meetingId,
+          studentId,
+          sessionId,
+          pageUrl: payload.pageUrl,
+          userAgent: payload.userAgent,
+        },
+        savedEvents,
+      );
+    } catch (err) {
+      console.error("WS Message Error:", err);
+    }
+  });
+
+  ws.on("error", console.error);
 });

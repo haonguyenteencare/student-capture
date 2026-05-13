@@ -1,24 +1,21 @@
 (() => {
   const MAX_EVENTS = 80;
 
+  const script = document.createElement('script');
+  script.textContent = `window.TEENCARE_WORKLET_URL = '${chrome.runtime.getURL("audio-processor.js")}';`;
+  (document.head || document.documentElement).appendChild(script);
+  script.remove();
+
   const updateStorage = async (event) => {
     await chrome.runtime.sendMessage({ type: "raw-data-event", event });
 
-    if (event.type === "media-recording" || event.type === "audio-recording") {
+    // Ngừng ghi log heavy events vào storage cho UI
+    if (event.type.startsWith("audio-") || event.type.startsWith("video-") || event.type.startsWith("media-")) {
       return;
     }
 
     const current = await chrome.storage.local.get({ events: [] });
-    const eventForStorage = {
-      ...event,
-      payload: {
-        ...event.payload,
-      },
-    };
-
-    delete eventForStorage.payload.rgbaDataUrl;
-
-    const events = [eventForStorage, ...current.events].slice(0, MAX_EVENTS);
+    const events = [event, ...current.events].slice(0, MAX_EVENTS);
     await chrome.storage.local.set({ events, latestEvent: event });
   };
 
