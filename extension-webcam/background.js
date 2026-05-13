@@ -162,6 +162,8 @@ const queueUpload = async (tabId, event) => {
 let ws = null;
 let offlineQueue = [];
 let pingInterval = null;
+let wsRetryDelay = 5000;     // Bắt đầu 5s
+const WS_MAX_RETRY = 60000; // Tối đa 60s
 
 const ensureWsConnection = () => {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -172,6 +174,7 @@ const ensureWsConnection = () => {
   
   ws.onopen = () => {
     console.log("WebSocket connected");
+    wsRetryDelay = 5000; // Reset delay khi kết nối thành công
     if (pingInterval) clearInterval(pingInterval);
     pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) ws.send("ping");
@@ -193,13 +196,14 @@ const ensureWsConnection = () => {
   };
   
   ws.onclose = () => {
-    console.log("WebSocket closed");
     if (pingInterval) clearInterval(pingInterval);
-    setTimeout(ensureWsConnection, 5000);
+    // Exponential backoff: 5s → 10s → 20s → ... → 60s
+    setTimeout(ensureWsConnection, wsRetryDelay);
+    wsRetryDelay = Math.min(wsRetryDelay * 2, WS_MAX_RETRY);
   };
   
-  ws.onerror = (err) => {
-    console.error("WebSocket error", err);
+  ws.onerror = () => {
+    // Lỗi đã được xử lý ở onclose, không cần log lại để tránh spam
   };
 };
 

@@ -301,6 +301,15 @@
     }
   };
 
+  // Helper: encode uint8 → base64 an toàn qua postMessage boundary
+  const uint8ToBase64 = (uint8) => {
+    let binaryString = "";
+    for (let i = 0; i < uint8.byteLength; i++) {
+      binaryString += String.fromCharCode(uint8[i]);
+    }
+    return btoa(binaryString);
+  };
+
   const readAudioSamples = async (stream, track, streamId) => {
     const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
 
@@ -312,42 +321,38 @@
       return;
     }
 
-    // WORKAROUND CHROME BUG: Chrome có một lỗi kinh điển khiến createMediaStreamSource
-    // trả về toàn số 0 (im lặng) nếu luồng đó là remote WebRTC stream và không được
-    // gắn vào một thẻ <audio> nào đang phát. Chúng ta tạo một thẻ audio ẩn để "mồi".
+    // WORKAROUND CHROME BUG: remote WebRTC stream trả về im lặng nếu không được
+    // gắn vào thẻ <audio> đang phát. Tạo audio ẩn để "mồi".
     const dummyAudio = new Audio();
     dummyAudio.srcObject = stream;
-    dummyAudio.muted = true; // Mute để không bị vang tiếng
+    dummyAudio.muted = true;
     dummyAudio.play().catch(() => {});
 
     const audioContext = new AudioContextCtor();
     const source = audioContext.createMediaStreamSource(stream);
-    
-    let previewIntervalId = null;
-
-    try {
-      if (!window.TEENCARE_WORKLET_URL) {
-        throw new Error("Missing TEENCARE_WORKLET_URL");
-      }
-      await audioContext.audioWorklet.addModule(window.TEENCARE_WORKLET_URL);
-    } catch (err) {
-      console.error("[MeetRawData] Failed to load AudioWorklet", err);
-      return;
-    }
-
-    const processor = new AudioWorkletNode(audioContext, "audio-processor");
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 256;
-
-    source.connect(processor);
     source.connect(analyser);
-    processor.connect(audioContext.destination);
+
+    let previewIntervalId = null;
+    let useWorklet = false;
+
+    // Thử dùng AudioWorklet trước
+    if (window.TEENCARE_WORKLET_URL) {
+      try {
+        await audioContext.audioWorklet.addModule(window.TEENCARE_WORKLET_URL);
+        useWorklet = true;
+        console.log("[MeetRawData] AudioWorklet loaded OK");
+      } catch (err) {
+        console.warn("[MeetRawData] AudioWorklet failed, falling back to ScriptProcessor:", err.message);
+      }
+    } else {
+      console.warn("[MeetRawData] TEENCARE_WORKLET_URL not set, using ScriptProcessor fallback");
+    }
 
     const cleanup = () => {
-      if (previewIntervalId !== null) {
-        window.clearInterval(previewIntervalId);
-      }
-      processor.disconnect();
+      if (previewIntervalId !== null) window.clearInterval(previewIntervalId);
+      analyser.disconnect();
       source.disconnect();
       if (dummyAudio.srcObject) {
         dummyAudio.pause();
@@ -358,21 +363,69 @@
 
     track.addEventListener("ended", cleanup, { once: true });
 
-    processor.port.onmessage = (event) => {
-      const int16Buffer = event.data;
-      const uint8 = new Uint8Array(int16Buffer);
+    if (useWorklet) {
+      // --- NHÁNH WORKLET ---
+      const processor = new AudioWorkletNode(audioContext, "audio-processor");
+      source.connect(processor);
+      processor.connect(audioContext.destination);
 
-      post("audio-recording", {
-        streamId,
-        track: summarizeTrack(track),
-        sampleRate: 16000,
-        channels: 1,
-        sampleCount: int16Buffer.byteLength / 2,
-        encoding: "i16le",
-        dataBuffer: uint8,
-      });
-    };
+      processor.port.onmessage = (event) => {
+        const int16Buffer = event.data;
+        const base64 = uint8ToBase64(new Uint8Array(int16Buffer));
 
+        post("audio-recording", {
+          streamId,
+          track: summarizeTrack(track),
+          sampleRate: 16000,
+          channels: 1,
+          sampleCount: int16Buffer.byteLength / 2,
+          encoding: "i16le",
+          dataBase64: base64,
+        });
+      };
+    } else {
+      // --- NHÁNH FALLBACK: ScriptProcessorNode ---
+      const scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+      source.connect(scriptProcessor);
+      scriptProcessor.connect(audioContext.destination);
+
+      const nativeRate = audioContext.sampleRate;
+      const ratio = nativeRate / 16000;
+      let lastSampleIndex = 0;
+      const chunkDurationSamples = 16000 * 5; // 5 giây @16kHz
+      const downsampled = [];
+
+      scriptProcessor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        for (let i = 0; i < input.length; i++) {
+          lastSampleIndex += 1;
+          if (lastSampleIndex >= ratio) {
+            lastSampleIndex -= ratio;
+            const s = input[i];
+            const int16 = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            downsampled.push(int16);
+          }
+        }
+
+        if (downsampled.length >= chunkDurationSamples) {
+          const chunk = downsampled.splice(0, chunkDurationSamples);
+          const int16Arr = new Int16Array(chunk);
+          const base64 = uint8ToBase64(new Uint8Array(int16Arr.buffer));
+
+          post("audio-recording", {
+            streamId,
+            track: summarizeTrack(track),
+            sampleRate: 16000,
+            channels: 1,
+            sampleCount: chunk.length,
+            encoding: "i16le",
+            dataBase64: base64,
+          });
+        }
+      };
+    }
+
+    // Preview audio level (chung cho cả 2 nhánh)
     previewIntervalId = window.setInterval(() => {
       const dataArray = new Float32Array(analyser.fftSize);
       analyser.getFloatTimeDomainData(dataArray);
