@@ -3,7 +3,7 @@
   "name": "Meet getUserMedia Raw Data PoC",
   "version": "0.1.0",
   "description": "PoC extension that hooks getUserMedia on Google Meet and captures raw audio/video.",
-  "permissions": ["activeTab"],
+  "permissions": ["activeTab", "notifications"],
   "host_permissions": ["https://meet.google.com/*", "http://localhost:8787/*"],
   "content_scripts": [
     {

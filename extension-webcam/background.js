@@ -1,5 +1,6 @@
 const API = "http://localhost:8787";
 const sessions = new Map();
+let serverOnline = true; // Trạng thái server, mặc định là online
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 const getSession = (tabId, url) => {
@@ -105,5 +106,37 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   return false;
 });
 
-// Retry mỗi 10 giây (khi server recover hoặc mạng trở lại)
-setInterval(flushBuffer, 10000);
+// ─── Kiểm tra server & thông báo khi mất kết nối ───────────────────────────
+const checkServerAndNotify = async () => {
+  try {
+    await fetch(`${API}/api/ping`, { method: "GET", signal: AbortSignal.timeout(3000) });
+    if (!serverOnline) {
+      serverOnline = true;
+      chrome.notifications.create("server-back", {
+        type: "basic",
+        iconUrl: "icons/icon48.png",
+        title: "✅ Kết nối đã phục hồi",
+        message: "Server đã hoạt động trở lại. Dữ liệu tồn đọng sẽ được gửi lên ngay.",
+        priority: 1,
+      });
+      flushBuffer();
+    }
+  } catch {
+    if (serverOnline) {
+      serverOnline = false;
+      chrome.notifications.create("server-down", {
+        type: "basic",
+        iconUrl: "icons/icon48.png",
+        title: "⚠️ Mất kết nối server!",
+        message: "Đừng tắt Google Meet. Dữ liệu đang được lưu tạm, sẽ gửi lên khi có mạng trở lại.",
+        priority: 2,
+      });
+    }
+  }
+};
+
+// Retry flush + kiểm tra server mỗi 10 giây
+setInterval(() => {
+  flushBuffer();
+  checkServerAndNotify();
+}, 10000);
