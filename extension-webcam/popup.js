@@ -1,10 +1,10 @@
 const eventsEl       = document.getElementById("events");
 const statusEl       = document.getElementById("status");
-const serverStatusEl = document.getElementById("serverStatus");
+const serverStatusEl = document.getElementById("serverStatus"); // null khi disabled
 const queueBadgeEl   = document.getElementById("queueBadge");
 const offlineWarning = document.getElementById("offline-warning");
 const clearBtn       = document.getElementById("clear");
-const exportBtn      = document.getElementById("export");
+const exportBtn      = document.getElementById("export");        // null khi disabled
 const viewerBtn      = document.getElementById("viewer");
 const studentIdInput = document.getElementById("studentIdInput");
 const saveIdentityBtn= document.getElementById("saveIdentity");
@@ -20,16 +20,17 @@ window.addEventListener("online",  () => { offlineWarning.style.display = "none"
 if (!navigator.onLine) offlineWarning.style.display = "flex";
 
 // ── Server ping ───────────────────────────────────────────────────────────────
-async function checkServer() {
-  try {
-    await fetch(`${API}/api/ping`, { signal: AbortSignal.timeout(2000) });
-    serverStatusEl.textContent = "✅ Server đang hoạt động";
-    serverStatusEl.style.color = "#4ade80";
-  } catch {
-    serverStatusEl.textContent = "❌ Server không kết nối được";
-    serverStatusEl.style.color = "#f87171";
-  }
-}
+// ❌ DISABLED: server.js chưa có endpoint GET /api/ping
+// async function checkServer() {
+//   try {
+//     await fetch(`${API}/api/ping`, { signal: AbortSignal.timeout(2000) });
+//     serverStatusEl.textContent = "✅ Server đang hoạt động";
+//     serverStatusEl.style.color = "#4ade80";
+//   } catch {
+//     serverStatusEl.textContent = "❌ Server không kết nối được";
+//     serverStatusEl.style.color = "#f87171";
+//   }
+// }
 
 // ── IndexedDB queue count ─────────────────────────────────────────────────────
 async function countQueue() {
@@ -121,14 +122,15 @@ clearBtn.addEventListener("click", async () => {
   renderEvents();
 });
 
-exportBtn.addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
-  if (!tab?.id) { statusEl.textContent = "Không tìm thấy tab Meet."; return; }
-  const result = await chrome.runtime.sendMessage({ type: "export-session", tabId: tab.id }).catch(() => ({ ok: false }));
-  statusEl.textContent = result?.ok
-    ? `Đã export: ${result.filename}`
-    : "Export thất bại.";
-});
+// ❌ DISABLED: background.js chưa có handler cho message type "export-session"
+// exportBtn.addEventListener("click", async () => {
+//   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => []);
+//   if (!tab?.id) { statusEl.textContent = "Không tìm thấy tab Meet."; return; }
+//   const result = await chrome.runtime.sendMessage({ type: "export-session", tabId: tab.id }).catch(() => ({ ok: false }));
+//   statusEl.textContent = result?.ok
+//     ? `Đã export: ${result.filename}`
+//     : "Export thất bại.";
+// });
 
 viewerBtn.addEventListener("click", () => {
   chrome.tabs.create({ url: chrome.runtime.getURL("viewer.html") });
@@ -144,7 +146,8 @@ saveIdentityBtn.addEventListener("click", async () => {
 
 // ── Refresh ───────────────────────────────────────────────────────────────────
 async function refresh() {
-  await Promise.all([checkServer(), countQueue(), renderEvents()]);
+  // checkServer() đã bị disabled — server chưa có /api/ping
+  await Promise.all([countQueue(), renderEvents()]);
 }
 
 refresh();

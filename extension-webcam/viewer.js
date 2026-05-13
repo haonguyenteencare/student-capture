@@ -94,11 +94,17 @@ const encodeWav = (samples, sampleRate) => {
 
 const renderSession = (session) => {
   const videoFrames = session.events.filter((event) => event.type === "video-frame");
-  const audioRecordings = session.events.filter((event) => event.type === "audio-recording");
-  const mediaRecordings = session.events.filter((event) => event.type === "media-recording");
-  const audioChunks = session.events.filter((event) => event.type === "audio-samples");
 
-  summaryElement.textContent = `${session.id}: ${videoFrames.length} video frame sample(s), ${audioRecordings.length} PCM audio preview(s), ${mediaRecordings.length} WebM recording chunk(s), ${audioChunks.length} audio chunk event(s), ${session.startedAt}`;
+  // ❌ DISABLED: các type này không còn được phát ra bởi hook.js hiện tại
+  // const audioRecordings = session.events.filter((event) => event.type === "audio-recording");
+  // const mediaRecordings = session.events.filter((event) => event.type === "media-recording");
+  // const audioChunks = session.events.filter((event) => event.type === "audio-samples");
+
+  // Type hiện tại của hook.js: "audio-chunk", "webm-chunk", "video-frame"
+  const audioChunks = session.events.filter((event) => event.type === "audio-chunk");
+  const webmChunks  = session.events.filter((event) => event.type === "webm-chunk");
+
+  summaryElement.textContent = `${session.id}: ${videoFrames.length} video frame(s), ${audioChunks.length} audio chunk(s), ${webmChunks.length} WebM chunk(s) — ${session.startedAt}`;
   framesElement.textContent = "";
   audioElement.textContent = "";
   recordingsElement.textContent = "";
@@ -108,13 +114,12 @@ const renderSession = (session) => {
 
   for (const event of videoFrames) {
     const { card, meta } = makeCard(
-      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.displayWidth}x${event.payload.displayHeight} - ${event.payload.checksum}`,
+      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.width}x${event.payload.height}`,
     );
 
-    if (event.payload.thumbnailDataUrl) {
+    if (event.payload.thumbDataUrl) {
       const image = document.createElement("img");
-
-      image.src = event.payload.thumbnailDataUrl;
+      image.src = event.payload.thumbDataUrl;
       image.alt = "Captured frame";
       card.append(image);
     }
@@ -123,38 +128,39 @@ const renderSession = (session) => {
     framesElement.append(card);
   }
 
-  for (const event of audioRecordings) {
-    const blob = encodeWav(event.payload.samples || [], event.payload.sampleRate);
-    const audio = document.createElement("audio");
-    const { card, meta } = makeCard(
-      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.sampleCount} samples @ ${event.payload.sampleRate}Hz`,
-    );
+  // ❌ DISABLED: "audio-recording" type không còn tồn tại trong hook.js
+  // for (const event of audioRecordings) {
+  //   const blob = encodeWav(event.payload.samples || [], event.payload.sampleRate);
+  //   const audio = document.createElement("audio");
+  //   const { card, meta } = makeCard(...);
+  //   audio.controls = true;
+  //   audio.src = URL.createObjectURL(blob);
+  //   card.append(audio, meta);
+  //   audioElement.append(card);
+  // }
 
-    audio.controls = true;
-    audio.src = URL.createObjectURL(blob);
-    card.append(audio, meta);
+  // ❌ DISABLED: "media-recording" type không còn tồn tại trong hook.js
+  // for (const event of mediaRecordings) {
+  //   const media = document.createElement(event.payload.hasVideo ? "video" : "audio");
+  //   ...
+  // }
+
+  // audio-chunk: hiện metadata + waveform (không decode WAV vì dữ liệu đã được gửi lên server dưới dạng base64)
+  for (const event of audioChunks) {
+    const { card, meta } = makeCard(
+      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.sampleCount} samples @ ${event.payload.sampleRate}Hz [${event.payload.streamId}]`,
+    );
+    card.append(meta);
     audioElement.append(card);
   }
 
-  for (const event of mediaRecordings) {
-    const media = document.createElement(event.payload.hasVideo ? "video" : "audio");
+  // webm-chunk: hiện metadata
+  for (const event of webmChunks) {
     const { card, meta } = makeCard(
-      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.mimeType} - ${Math.round(event.payload.size / 1024)}KB`,
+      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.mimeType} [${event.payload.streamId}]`,
     );
-
-    media.controls = true;
-    media.src = event.payload.dataUrl;
-    card.append(media, meta);
+    card.append(meta);
     recordingsElement.append(card);
-  }
-
-  for (const event of audioChunks.slice(0, audioRecordings.length ? 12 : audioChunks.length)) {
-    const { card, meta } = makeCard(
-      `${new Date(event.at).toLocaleTimeString()} - ${event.payload.sampleCount} samples @ ${event.payload.sampleRate}Hz - peak ${event.payload.peak}`,
-    );
-
-    card.append(drawAudio(event.payload.firstSamples || []), meta);
-    audioElement.append(card);
   }
 };
 
