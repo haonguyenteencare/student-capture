@@ -1,10 +1,8 @@
 import cors from "cors";
 import express from "express";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { WebSocketServer } from "ws";
-import { decode } from "@msgpack/msgpack";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,397 +11,78 @@ const capturesRoot = path.join(projectRoot, "captures");
 const port = Number(process.env.PORT || 8787);
 
 const app = express();
-
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "250mb" }));
 app.use("/captures", express.static(capturesRoot));
 
-const sanitizeSegment = (value, fallback) => {
-  const sanitized = String(value || "")
-    .trim()
-    .replace(/[^a-zA-Z0-9._-]/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 120);
+const sanitize = (v, fallback) =>
+  String(v || "").trim().replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 120) || fallback;
 
-  return sanitized || fallback;
-};
-
-const parseDataUrl = (dataUrl) => {
-  const match = /^data:([^,]*?)(;base64)?,(.*)$/s.exec(dataUrl || "");
-
-  if (!match) {
-    throw new Error("Invalid data URL");
-  }
-
-  const mimeType = match[1] || "application/octet-stream";
-  const isBase64 = Boolean(match[2]);
-  const data = match[3] || "";
-  const buffer = isBase64
-    ? Buffer.from(data, "base64")
-    : Buffer.from(decodeURIComponent(data), "utf8");
-
-  return { buffer, mimeType };
-};
-
-const decodeNumberArray = (values, bytesPerValue) => {
-  if (!Array.isArray(values)) {
-    return Buffer.alloc(0);
-  }
-
-  if (bytesPerValue === 4) {
-    const buffer = Buffer.alloc(values.length * 4);
-
-    values.forEach((value, index) => {
-      buffer.writeFloatLE(Number(value) || 0, index * 4);
-    });
-
-    return buffer;
-  }
-
-  return Buffer.from(values.map((value) => Number(value) || 0));
-};
-
-const decodeAudioData = (payload) => {
-  if (payload.dataBuffer) {
-    return Buffer.from(payload.dataBuffer);
-  }
-  if (payload.dataBase64) {
-    return Buffer.from(payload.dataBase64, "base64");
-  }
-  if (Array.isArray(payload.samples)) {
-    return decodeNumberArray(payload.samples, 4);
-  }
-  return Buffer.alloc(0);
-};
-
-const readManifest = async (manifestPath) => {
+// ─── POST /api/capture ───────────────────────────────────────────────────────
+app.post("/api/capture", async (req, res) => {
   try {
-    return JSON.parse(await readFile(manifestPath, "utf8"));
-  } catch {
-    return null;
-  }
-};
+    const { sessionId, meetingId, studentId, type, payload, at } = req.body;
 
-const writeJson = async (filePath, value) => {
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`);
-};
-
-const appendManifestEvents = async (sessionDir, sessionInfo, savedEvents) => {
-  const manifestPath = path.join(sessionDir, "manifest.json");
-  const existing = await readManifest(manifestPath);
-  const manifest =
-    existing ||
-    {
-      formatVersion: 1,
-      ...sessionInfo,
-      startedAt: new Date().toISOString(),
-      updatedAt: null,
-      eventCount: 0,
-      events: [],
-    };
-
-  manifest.updatedAt = new Date().toISOString();
-  manifest.eventCount += savedEvents.length;
-  manifest.events.push(...savedEvents);
-
-  await writeJson(manifestPath, manifest);
-
-  return manifest;
-};
-
-const saveEvent = async (sessionDir, event, index) => {
-  const payload = event.payload || {};
-  const timestamp = Number(event.at || Date.now());
-  const streamId = sanitizeSegment(payload.streamId, "stream");
-  const baseName = `${timestamp}-${streamId}-${String(index).padStart(4, "0")}`;
-  const saved = {
-    type: event.type,
-    at: timestamp,
-    pageUrl: event.pageUrl,
-    streamId: payload.streamId,
-    files: {},
-    metadata: {},
-  };
-
-  if (event.type === "video-frame") {
-    const frameDir = path.join(sessionDir, "frames");
-
-    await mkdir(frameDir, { recursive: true });
-
-    if (payload.thumbnailDataUrl) {
-      const { buffer } = parseDataUrl(payload.thumbnailDataUrl);
-      const thumbnailPath = path.join(frameDir, `${baseName}.jpg`);
-
-      await writeFile(thumbnailPath, buffer);
-      saved.files.thumbnail = path.relative(sessionDir, thumbnailPath);
-    }
-
-    if (payload.rgbaDataUrl) {
-      const { buffer } = parseDataUrl(payload.rgbaDataUrl);
-      const rawPath = path.join(frameDir, `${baseName}.rgba`);
-
-      await writeFile(rawPath, buffer);
-      saved.files.rgba = path.relative(sessionDir, rawPath);
-      saved.metadata.rawByteSize = buffer.byteLength;
-    }
-
-    saved.metadata = {
-      ...saved.metadata,
-      width: payload.displayWidth,
-      height: payload.displayHeight,
-      allocationSize: payload.allocationSize,
-      checksum: payload.checksum,
-      sourceFormat: payload.sourceFormat,
-      copiedFormat: payload.copiedFormat,
-      rawSource: payload.rawSource,
-      track: payload.track,
-    };
-    return saved;
-  }
-
-  if (event.type === "audio-recording") {
-    const subFolder = String(payload.streamId).startsWith("remote-") ? "remote" : "local";
-    const audioDir = path.join(sessionDir, "audio", subFolder);
-
-    await mkdir(audioDir, { recursive: true });
-
-    const samplesPath = path.join(audioDir, `${baseName}.json`);
-    const binPath = path.join(audioDir, `${baseName}.bin`);
-
-    await writeJson(samplesPath, {
-      sampleRate: payload.sampleRate,
-      channels: payload.channels,
-      sampleCount: payload.sampleCount,
-      encoding: payload.encoding,
-    });
-
-    const buffer = decodeAudioData(payload);
-    await writeFile(binPath, buffer);
-
-    saved.files.samples = path.relative(sessionDir, samplesPath);
-    saved.files.bin = path.relative(sessionDir, binPath);
-    saved.metadata = {
-      sampleRate: payload.sampleRate,
-      channels: payload.channels,
-      sampleCount: payload.sampleCount,
-      track: payload.track,
-    };
-    return saved;
-  }
-
-  if (event.type === "media-recording") {
-    const subFolder = String(payload.streamId).startsWith("remote-") ? "remote" : "local";
-    const recordingDir = path.join(sessionDir, "recordings", subFolder);
-
-    await mkdir(recordingDir, { recursive: true });
-
-    if (payload.dataUrl) {
-      const { buffer, mimeType } = parseDataUrl(payload.dataUrl);
-      const extension = mimeType.includes("webm") ? "webm" : "bin";
-      const recordingPath = path.join(recordingDir, `${baseName}.${extension}`);
-
-      await writeFile(recordingPath, buffer);
-      saved.files.recording = path.relative(sessionDir, recordingPath);
-      saved.metadata.byteSize = buffer.byteLength;
-    }
-
-    saved.metadata = {
-      ...saved.metadata,
-      mimeType: payload.mimeType,
-      size: payload.size,
-      hasAudio: payload.hasAudio,
-      hasVideo: payload.hasVideo,
-    };
-    return saved;
-  }
-
-  const eventDir = path.join(sessionDir, "events");
-
-  await mkdir(eventDir, { recursive: true });
-
-  const eventPath = path.join(eventDir, `${baseName}-${sanitizeSegment(event.type, "event")}.json`);
-
-  await writeJson(eventPath, event);
-  saved.files.event = path.relative(sessionDir, eventPath);
-  saved.metadata = payload;
-
-  return saved;
-};
-
-const findManifests = async (directory) => {
-  const manifests = [];
-
-  try {
-    const entries = await readdir(directory, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const entryPath = path.join(directory, entry.name);
-
-      if (entry.isDirectory()) {
-        manifests.push(...(await findManifests(entryPath)));
-      } else if (entry.name === "manifest.json") {
-        manifests.push(entryPath);
-      }
-    }
-  } catch {
-    return manifests;
-  }
-
-  return manifests;
-};
-
-app.get("/health", (_request, response) => {
-  response.json({ ok: true, capturesRoot });
-});
-
-app.post("/api/capture/batch", async (request, response, next) => {
-  try {
-    const body = request.body || {};
-    const meetingId = sanitizeSegment(body.meetingId, "unknown-meeting");
-    const studentId = sanitizeSegment(body.studentId, "unknown-student");
-    const sessionId = sanitizeSegment(body.sessionId, "unknown-session");
-    const events = Array.isArray(body.events) ? body.events : [];
-    const sessionDir = path.join(capturesRoot, meetingId, studentId, sessionId);
-
-    await mkdir(sessionDir, { recursive: true });
-
-    const savedEvents = [];
-
-    for (let index = 0; index < events.length; index += 1) {
-      savedEvents.push(await saveEvent(sessionDir, events[index], index));
-    }
-
-    const manifest = await appendManifestEvents(
-      sessionDir,
-      {
-        meetingId,
-        studentId,
-        sessionId,
-        pageUrl: body.pageUrl,
-        userAgent: body.userAgent,
-      },
-      savedEvents,
+    const dir = path.join(
+      capturesRoot,
+      sanitize(meetingId, "unknown-meeting"),
+      sanitize(studentId, "unknown-student"),
+      sanitize(sessionId, "unknown-session"),
     );
+    await mkdir(dir, { recursive: true });
 
-    response.json({
-      ok: true,
-      meetingId,
-      studentId,
-      sessionId,
-      savedEventCount: savedEvents.length,
-      totalEventCount: manifest.eventCount,
-      sessionPath: path.relative(projectRoot, sessionDir),
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+    const ts = at || Date.now();
 
-app.get("/api/sessions", async (_request, response, next) => {
-  try {
-    const manifestPaths = await findManifests(capturesRoot);
-    const sessions = [];
-
-    for (const manifestPath of manifestPaths) {
-      const manifest = await readManifest(manifestPath);
-      const stats = await stat(manifestPath);
-
-      if (manifest) {
-        sessions.push({
-          meetingId: manifest.meetingId,
-          studentId: manifest.studentId,
-          sessionId: manifest.sessionId,
-          startedAt: manifest.startedAt,
-          updatedAt: manifest.updatedAt,
-          eventCount: manifest.eventCount,
-          manifestPath: path.relative(capturesRoot, manifestPath),
-          modifiedAt: stats.mtime.toISOString(),
-        });
-      }
+    // ── Audio F32 raw ──
+    if (type === "audio-chunk") {
+      const { streamId, sampleRate, sampleCount, encoding, dataBase64 } = payload;
+      const subdir = String(streamId).startsWith("remote") ? "audio/remote" : "audio/local";
+      await mkdir(path.join(dir, subdir), { recursive: true });
+      const name = `${ts}-${sanitize(streamId, "stream")}`;
+      await writeFile(path.join(dir, subdir, `${name}.f32`), Buffer.from(dataBase64, "base64"));
+      await writeFile(
+        path.join(dir, subdir, `${name}.json`),
+        JSON.stringify({ sampleRate, sampleCount, encoding }),
+      );
+      console.log(`[audio] ${subdir}/${name}.f32 (${sampleCount} samples @ ${sampleRate}Hz)`);
     }
 
-    sessions.sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));
-    response.json({ ok: true, sessions });
-  } catch (error) {
-    next(error);
-  }
-});
-
-app.get("/api/sessions/:sessionId", async (request, response, next) => {
-  try {
-    const manifestPaths = await findManifests(capturesRoot);
-    const target = sanitizeSegment(request.params.sessionId, "");
-
-    for (const manifestPath of manifestPaths) {
-      const manifest = await readManifest(manifestPath);
-
-      if (manifest?.sessionId === target) {
-        response.json({ ok: true, session: manifest });
-        return;
+    // ── Video RGBA + JPEG thumbnail ──
+    else if (type === "video-frame") {
+      const { streamId, width, height, rgbaBase64, thumbDataUrl } = payload;
+      await mkdir(path.join(dir, "frames"), { recursive: true });
+      const name = `${ts}-${sanitize(streamId, "stream")}`;
+      await writeFile(
+        path.join(dir, "frames", `${name}.rgba`),
+        Buffer.from(rgbaBase64, "base64"),
+      );
+      if (thumbDataUrl) {
+        const b64 = thumbDataUrl.split(",")[1];
+        await writeFile(path.join(dir, "frames", `${name}.jpg`), Buffer.from(b64, "base64"));
       }
+      console.log(`[video] frames/${name}.rgba (${width}x${height})`);
     }
 
-    response.status(404).json({ ok: false, reason: "Session not found" });
-  } catch (error) {
-    next(error);
+    // ── WebM chunk ──
+    else if (type === "webm-chunk") {
+      const { streamId, dataBase64 } = payload;
+      await mkdir(path.join(dir, "webm"), { recursive: true });
+      const name = `${ts}-${sanitize(streamId, "stream")}`;
+      await writeFile(path.join(dir, "webm", `${name}.webm`), Buffer.from(dataBase64, "base64"));
+      console.log(`[webm] webm/${name}.webm`);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Capture error:", err.message);
+    res.status(500).json({ ok: false, reason: err.message });
   }
 });
 
-app.use((error, _request, response, _next) => {
-  console.error(error);
-  response.status(500).json({ ok: false, reason: error.message });
-});
-
+// ─── Start ───────────────────────────────────────────────────────────────────
 await mkdir(capturesRoot, { recursive: true });
 
-const server = app.listen(port, () => {
-  console.log(`Meet capture API listening on http://localhost:${port}`);
-  console.log(`Captures root: ${capturesRoot}`);
-});
-
-const wss = new WebSocketServer({ server });
-
-wss.on("connection", (ws) => {
-  console.log("WebSocket client connected");
-  
-  ws.on("message", async (data, isBinary) => {
-    try {
-      if (!isBinary) {
-        const text = data.toString();
-        if (text === "ping") {
-          ws.send("pong");
-        }
-        return;
-      }
-      
-      const payload = decode(data);
-      const meetingId = sanitizeSegment(payload.meetingId, "unknown-meeting");
-      const studentId = sanitizeSegment(payload.studentId, "unknown-student");
-      const sessionId = sanitizeSegment(payload.sessionId, "unknown-session");
-      const events = Array.isArray(payload.events) ? payload.events : [];
-      const sessionDir = path.join(capturesRoot, meetingId, studentId, sessionId);
-
-      await mkdir(sessionDir, { recursive: true });
-      const savedEvents = [];
-      for (let index = 0; index < events.length; index += 1) {
-        savedEvents.push(await saveEvent(sessionDir, events[index], index));
-      }
-
-      await appendManifestEvents(
-        sessionDir,
-        {
-          meetingId,
-          studentId,
-          sessionId,
-          pageUrl: payload.pageUrl,
-          userAgent: payload.userAgent,
-        },
-        savedEvents,
-      );
-    } catch (err) {
-      console.error("WS Message Error:", err);
-    }
-  });
-
-  ws.on("error", console.error);
+app.listen(port, () => {
+  console.log(`Meet capture API → http://localhost:${port}`);
+  console.log(`Captures root    → ${capturesRoot}`);
 });
