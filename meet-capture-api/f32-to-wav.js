@@ -156,24 +156,31 @@ async function processDirectory(dir, outputPrefix) {
         
         try {
           let encoding = "f32le";
-          const jsonContent = JSON.parse(await fs.readFile(path.join(dir, jsonFile), "utf8"));
-          if (jsonContent.sampleRate) sampleRate = jsonContent.sampleRate;
-          if (jsonContent.encoding) encoding = jsonContent.encoding;
+          try {
+            const jsonContent = JSON.parse(await fs.readFile(path.join(dir, jsonFile), "utf8"));
+            if (jsonContent.sampleRate) sampleRate = jsonContent.sampleRate;
+            if (jsonContent.encoding) encoding = jsonContent.encoding;
+          } catch {
+            console.warn(`[WARN] Không tìm thấy metadata ${jsonFile} — mặc định đọc theo F32. Audio có thể sai nếu thực tế là I16!`);
+          }
           
           const fileBuffer = await fs.readFile(path.join(dir, file));
           let float32Array;
           
           if (encoding === "i16le") {
+            // TypedArray view — zero-copy, không cần loop
             const int16Array = new Int16Array(fileBuffer.buffer, fileBuffer.byteOffset, fileBuffer.byteLength / 2);
             float32Array = new Float32Array(int16Array.length);
-            for(let i=0; i<int16Array.length; i++) {
+            for (let i = 0; i < int16Array.length; i++) {
               float32Array[i] = int16Array[i] / 32768.0;
             }
           } else {
-            float32Array = new Float32Array(fileBuffer.length / 4);
-            for(let i=0; i<float32Array.length; i++) {
-              float32Array[i] = fileBuffer.readFloatLE(i * 4);
-            }
+            // TypedArray view thay vì loop readFloatLE — tránh alignment issue
+            float32Array = new Float32Array(
+              fileBuffer.buffer,
+              fileBuffer.byteOffset,
+              fileBuffer.byteLength / 4,
+            );
           }
           
           buffers.push(float32Array);
