@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "PoC extension that hooks getUserMedia on Google Meet and captures raw audio/video.",
   "permissions": ["activeTab", "notifications", "storage", "tabs"],
-  "host_permissions": ["https://meet.google.com/*", "http://localhost:8787/*"],
+  "host_permissions": ["https://meet.google.com/*", "http://localhost:8787/*", "https://student-capture.vercel.app/*"],
   "content_scripts": [
     {
       "matches": ["https://meet.google.com/*"],

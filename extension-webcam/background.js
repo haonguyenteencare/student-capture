@@ -1,4 +1,5 @@
-const API = "http://localhost:8787";
+importScripts("env.js");
+const API = ENV.API_URL;
 const sessions = new Map();
 
 // ─── Session ──────────────────────────────────────────────────────────────────

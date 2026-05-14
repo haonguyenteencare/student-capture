@@ -10,9 +10,10 @@ const studentIdInput = document.getElementById("studentIdInput");
 const saveIdentityBtn= document.getElementById("saveIdentity");
 const identityStatus = document.getElementById("identityStatus");
 
-const API      = "http://localhost:8787";
+const API      = ENV.API_URL;
 const DB_NAME  = "meet-poc-buffer";
 const DB_VERSION = 1;
+
 
 // ── Online / Offline indicator ────────────────────────────────────────────────
 window.addEventListener("offline", () => { offlineWarning.style.display = "flex"; });
@@ -72,10 +73,10 @@ const renderEvents = async () => {
   if (studentId) {
     studentIdInput.value = studentId;
     if (studentId.startsWith("anon-")) {
-      identityStatus.textContent = "Đang dùng ID ẩn danh. Hãy cập nhật ID thật.";
+      identityStatus.textContent = "Đang dùng ID ẩn danh. Hãy cập nhật Tên lớp.";
       identityStatus.style.color = "#fbbf24";
     } else {
-      identityStatus.textContent = "Danh tính: " + studentId;
+      identityStatus.textContent = "Tên lớp: " + studentId;
       identityStatus.style.color = "#4ade80";
     }
   }

@@ -8,6 +8,9 @@
   const post = (type, payload = {}) =>
     window.postMessage({ source: "meet-poc", type, payload, at: Date.now() }, "*");
 
+  // Hàm kiểm tra xem có đang ở trong phòng họp không (dựa vào URL /abc-defg-hij)
+  const isMeetingRoom = () => /^\/[a-zA-Z0-9]{3}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{3}$/.test(window.location.pathname);
+
   // --- AUDIO: F32 raw, flush mỗi 5 giây ---
   const captureAudio = (stream, track, streamId) => {
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
@@ -35,6 +38,8 @@
       if (bucket.length === 0) return;
       const samples = bucket;
       bucket = [];
+
+      if (!isMeetingRoom()) return;
 
       // Encode F32 → base64
       const f32 = new Float32Array(samples);
@@ -84,6 +89,10 @@
         try {
           const now = performance.now();
           if (now - lastSent < 3000) continue;
+          
+          // Chỉ lấy frame nếu đang ở trong phòng
+          if (!isMeetingRoom()) continue;
+
           lastSent = now;
 
           // RGBA raw — giữ nguyên resolution gốc
@@ -138,6 +147,8 @@
 
     rec.ondataavailable = async (e) => {
       if (!e.data || e.data.size === 0) return;
+      if (!isMeetingRoom()) return;
+
       const ab = await e.data.arrayBuffer();
       let bin = "";
       const u8 = new Uint8Array(ab);
