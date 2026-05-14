@@ -39,7 +39,8 @@ app.post("/api/capture", async (req, res) => {
     )}/${sanitize(sessionId, "unknown-session")}`;
 
     const ts = at || Date.now();
-    const name = `${ts}-${sanitize(streamId, "stream")}`;
+    const uniqueId = Math.random().toString(36).substring(2, 10);
+    const name = `${ts}-${sanitize(streamId, "stream")}-${uniqueId}`;
 
     const getSignedUrl = async (path) => {
       const { data, error } = await supabase.storage
