@@ -30,115 +30,114 @@ const saveToBuffer = async (data) => {
 const flushBuffer = async () => {
   const db = await openDB();
 
-  // Không dùng getAll() vì nếu có hàng trăm file nặng (mỗi file 5MB) sẽ gây tràn bộ nhớ (Crash SW)
-  const tx = db.transaction("chunks", "readonly");
-  const store = tx.objectStore("chunks");
-  const cursorRequest = store.openCursor();
+  // Dùng vòng lặp while thay vì cursor.continue() để tránh lỗi 'The transaction has finished'
+  // khi đợi các tác vụ async lâu (như fetch/upload)
+  while (true) {
+    const chunk = await new Promise((resolve) => {
+      const tx = db.transaction("chunks", "readonly");
+      const store = tx.objectStore("chunks");
+      const req = store.openCursor();
+      req.onsuccess = (e) => resolve(e.target.result ? e.target.result.value : null);
+      req.onerror = () => resolve(null);
+    });
 
-  return new Promise((resolve) => {
-    cursorRequest.onsuccess = async (e) => {
-      const cursor = e.target.result;
-      if (!cursor) {
-        resolve();
-        return;
+    if (!chunk) break;
+
+    try {
+      // 1. Chuẩn bị metadata
+      const meta = {
+        sessionId: chunk.sessionId,
+        meetingId: chunk.meetingId,
+        studentId: chunk.studentId,
+        type: chunk.type,
+        at: chunk.at,
+        streamId: chunk.payload.streamId,
+      };
+
+      if (chunk.type === "video-frame") {
+        meta.hasWebp = !!chunk.payload.webpDataUrl;
+        meta.hasThumb = !!chunk.payload.thumbDataUrl;
       }
 
-      const chunk = cursor.value;
-      try {
-        // 1. Chuẩn bị metadata
-        const meta = {
-          sessionId: chunk.sessionId,
-          meetingId: chunk.meetingId,
-          studentId: chunk.studentId,
-          type: chunk.type,
-          at: chunk.at,
-          streamId: chunk.payload.streamId,
-        };
+      // 2. Lấy Signed URLs từ server
+      const res = await fetch(`${API}/api/capture`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(meta),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { signedUrls } = await res.json();
 
-        if (chunk.type === "video-frame") {
-          meta.hasWebp = !!chunk.payload.webpDataUrl;
-          meta.hasThumb = !!chunk.payload.thumbDataUrl;
+      // 3. Helper chuyển Base64 thành Blob
+      const b64toBlob = (b64DataURI, fallbackType) => {
+        let b64 = b64DataURI;
+        let type = fallbackType;
+        if (b64DataURI.startsWith("data:")) {
+          const parts = b64DataURI.split(",");
+          type = parts[0].split(":")[1].split(";")[0];
+          b64 = parts[1];
         }
+        const bin = atob(b64);
+        const u8 = new Uint8Array(bin.length);
+        for(let i=0; i<bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return new Blob([u8], { type });
+      };
 
-        // 2. Lấy Signed URLs từ server
-        const res = await fetch(`${API}/api/capture`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(meta),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const { signedUrls } = await res.json();
+      // 4. Upload file nhị phân
+      const uploads = [];
+      const putFile = async (urlObj, blob) => {
+        const upRes = await fetch(urlObj.signedUrl, { method: "PUT", body: blob, headers: { "Content-Type": blob.type } });
+        if (!upRes.ok) throw new Error(`Upload to Supabase failed: ${upRes.status}`);
+      };
 
-        // 3. Helper chuyển Base64 thành Blob
-        const b64toBlob = (b64DataURI, fallbackType) => {
-          let b64 = b64DataURI;
-          let type = fallbackType;
-          if (b64DataURI.startsWith("data:")) {
-            const parts = b64DataURI.split(",");
-            type = parts[0].split(":")[1].split(";")[0];
-            b64 = parts[1];
-          }
-          const bin = atob(b64);
-          const u8 = new Uint8Array(bin.length);
-          for(let i=0; i<bin.length; i++) u8[i] = bin.charCodeAt(i);
-          return new Blob([u8], { type });
-        };
-
-        // 4. Upload file nhị phân
-        const uploads = [];
-        const putFile = async (urlObj, blob) => {
-          const upRes = await fetch(urlObj.signedUrl, { method: "PUT", body: blob, headers: { "Content-Type": blob.type } });
-          if (!upRes.ok) throw new Error(`Upload to Supabase failed: ${upRes.status}`);
-        };
-
-        if (chunk.type === "audio-chunk" && signedUrls.f32) {
-          uploads.push(putFile(signedUrls.f32, b64toBlob(chunk.payload.dataBase64, "application/octet-stream")));
-          const jsonBlob = new Blob([JSON.stringify({ 
-            sampleRate: chunk.payload.sampleRate, 
-            sampleCount: chunk.payload.sampleCount, 
-            encoding: chunk.payload.encoding 
-          })], { type: "application/json" });
-          uploads.push(putFile(signedUrls.json, jsonBlob));
-        } 
-        else if (chunk.type === "video-frame") {
-          if (signedUrls.webp && chunk.payload.webpDataUrl) {
-            uploads.push(putFile(signedUrls.webp, b64toBlob(chunk.payload.webpDataUrl, "image/webp")));
-          }
-          if (signedUrls.thumb && chunk.payload.thumbDataUrl) {
-            uploads.push(putFile(signedUrls.thumb, b64toBlob(chunk.payload.thumbDataUrl, "image/jpeg")));
-          }
+      if (chunk.type === "audio-chunk" && signedUrls.f32) {
+        uploads.push(putFile(signedUrls.f32, b64toBlob(chunk.payload.dataBase64, "application/octet-stream")));
+        const jsonBlob = new Blob([JSON.stringify({ 
+          sampleRate: chunk.payload.sampleRate, 
+          sampleCount: chunk.payload.sampleCount, 
+          encoding: chunk.payload.encoding 
+        })], { type: "application/json" });
+        uploads.push(putFile(signedUrls.json, jsonBlob));
+      } 
+      else if (chunk.type === "video-frame") {
+        if (signedUrls.webp && chunk.payload.webpDataUrl) {
+          uploads.push(putFile(signedUrls.webp, b64toBlob(chunk.payload.webpDataUrl, "image/webp")));
         }
-        else if (chunk.type === "webm-chunk" && signedUrls.webm) {
-          uploads.push(putFile(signedUrls.webm, b64toBlob(chunk.payload.dataBase64, chunk.payload.mimeType || "video/webm")));
+        if (signedUrls.thumb && chunk.payload.thumbDataUrl) {
+          uploads.push(putFile(signedUrls.thumb, b64toBlob(chunk.payload.thumbDataUrl, "image/jpeg")));
         }
+      }
+      else if (chunk.type === "webm-chunk" && signedUrls.webm) {
+        uploads.push(putFile(signedUrls.webm, b64toBlob(chunk.payload.dataBase64, chunk.payload.mimeType || "video/webm")));
+      }
 
-        await Promise.all(uploads);
+      await Promise.all(uploads);
 
-        // 5. Xóa khỏi buffer sau khi upload thành công
+      // 5. Xóa khỏi buffer sau khi upload thành công
+      await new Promise((resolveDel) => {
         const deleteTx = db.transaction("chunks", "readwrite");
-        await new Promise((resolveDel) => {
-          const delReq = deleteTx.objectStore("chunks").delete(chunk.id);
-          delReq.onsuccess = resolveDel;
-        });
+        const delReq = deleteTx.objectStore("chunks").delete(chunk.id);
+        delReq.onsuccess = () => resolveDel();
+        delReq.onerror = () => resolveDel();
+      });
 
-        // Tiếp tục tới chunk tiếp theo
-        cursor.continue();
-      } catch (e) {
-        console.error("Flush error for chunk:", chunk.id, e.message);
-        // Nếu là lỗi HTTP, xóa chunk lỗi để không nghẽn
-        if (e.message.startsWith("HTTP") || e.message.includes("Supabase failed")) {
+      // Vòng lặp while sẽ tự động quay lại lấy chunk tiếp theo
+    } catch (e) {
+      console.error("Flush error for chunk:", chunk.id, e.message);
+      if (e.message.startsWith("HTTP") || e.message.includes("Supabase failed")) {
+        // Xóa chunk lỗi để không nghẽn hàng đợi
+        await new Promise((resolveDel) => {
           const deleteTx = db.transaction("chunks", "readwrite");
           deleteTx.objectStore("chunks").delete(chunk.id);
-          cursor.continue();
-        } else {
-          // Lỗi mạng hoặc lỗi khác, dừng xử lý và thoát
-          resolve();
-        }
+          deleteTx.oncomplete = () => resolveDel();
+        });
+        continue;
       }
-    };
-    cursorRequest.onerror = () => resolve();
-  });
+      break; // Lỗi mạng (Failed to fetch), dừng xử lý
+    }
+  }
 };
+
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "session-ended") {
