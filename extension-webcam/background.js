@@ -57,21 +57,84 @@ const flushBuffer = async () => {
 
   for (const chunk of all) {
     try {
+      // 1. Chuẩn bị metadata
+      const meta = {
+        sessionId: chunk.sessionId,
+        meetingId: chunk.meetingId,
+        studentId: chunk.studentId,
+        type: chunk.type,
+        at: chunk.at,
+        streamId: chunk.payload.streamId,
+      };
+
+      if (chunk.type === "video-frame") {
+        meta.hasWebp = !!chunk.payload.webpDataUrl;
+        meta.hasThumb = !!chunk.payload.thumbDataUrl;
+      }
+
+      // 2. Lấy Signed URLs từ server (chỉ gửi metadata bé tí)
       const res = await fetch(`${API}/api/capture`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(chunk),
+        body: JSON.stringify(meta),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { signedUrls } = await res.json();
 
-      // Xóa khỏi buffer sau khi upload thành công
+      // 3. Helper chuyển Base64 thành Blob
+      const b64toBlob = (b64DataURI, fallbackType) => {
+        let b64 = b64DataURI;
+        let type = fallbackType;
+        if (b64DataURI.startsWith("data:")) {
+          const parts = b64DataURI.split(",");
+          type = parts[0].split(":")[1].split(";")[0];
+          b64 = parts[1];
+        }
+        const bin = atob(b64);
+        const u8 = new Uint8Array(bin.length);
+        for(let i=0; i<bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return new Blob([u8], { type });
+      };
+
+      // 4. Upload file nhị phân bằng PUT request thẳng lên Supabase
+      const uploads = [];
+      const putFile = async (urlObj, blob) => {
+        const upRes = await fetch(urlObj.signedUrl, { method: "PUT", body: blob, headers: { "Content-Type": blob.type } });
+        if (!upRes.ok) throw new Error(`Upload to Supabase failed: ${upRes.status}`);
+      };
+
+      if (chunk.type === "audio-chunk" && signedUrls.f32) {
+        uploads.push(putFile(signedUrls.f32, b64toBlob(chunk.payload.dataBase64, "application/octet-stream")));
+        const jsonBlob = new Blob([JSON.stringify({ 
+          sampleRate: chunk.payload.sampleRate, 
+          sampleCount: chunk.payload.sampleCount, 
+          encoding: chunk.payload.encoding 
+        })], { type: "application/json" });
+        uploads.push(putFile(signedUrls.json, jsonBlob));
+      } 
+      else if (chunk.type === "video-frame") {
+        if (signedUrls.webp && chunk.payload.webpDataUrl) {
+          uploads.push(putFile(signedUrls.webp, b64toBlob(chunk.payload.webpDataUrl, "image/webp")));
+        }
+        if (signedUrls.thumb && chunk.payload.thumbDataUrl) {
+          uploads.push(putFile(signedUrls.thumb, b64toBlob(chunk.payload.thumbDataUrl, "image/jpeg")));
+        }
+      }
+      else if (chunk.type === "webm-chunk" && signedUrls.webm) {
+        uploads.push(putFile(signedUrls.webm, b64toBlob(chunk.payload.dataBase64, chunk.payload.mimeType || "video/webm")));
+      }
+
+      await Promise.all(uploads);
+
+      // 5. Xóa khỏi buffer sau khi upload thành công TẤT CẢ các file của chunk
       await new Promise((resolve) => {
         const tx = db.transaction("chunks", "readwrite");
         tx.objectStore("chunks").delete(chunk.id);
         tx.oncomplete = resolve;
       });
-    } catch {
-      break; // Vẫn mất mạng hoặc server lỗi, thử lại lần sau
+    } catch (e) {
+      console.error("Flush error:", e);
+      break; // Mất mạng hoặc server lỗi, dừng flush và thử lại lần sau
     }
   }
 };

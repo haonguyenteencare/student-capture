@@ -20,7 +20,7 @@
     const dummy = new Audio();
     dummy.srcObject = stream;
     dummy.muted = true;
-    dummy.play().catch(() => {});
+    dummy.play().catch(() => { });
 
     const ctx = new AudioCtx();
     const source = ctx.createMediaStreamSource(stream);
@@ -63,7 +63,7 @@
       processor.disconnect();
       source.disconnect();
       dummy.srcObject = null;
-      ctx.close().catch(() => {});
+      ctx.close().catch(() => { });
     }, { once: true });
   };
 
@@ -78,7 +78,7 @@
 
     track.addEventListener("ended", () => {
       clone.stop();
-      reader.cancel().catch(() => {});
+      reader.cancel().catch(() => { });
     }, { once: true });
 
     (async () => {
@@ -89,7 +89,7 @@
         try {
           const now = performance.now();
           if (now - lastSent < 3000) continue;
-          
+
           // Chỉ lấy frame nếu đang ở trong phòng
           if (!isMeetingRoom()) continue;
 
