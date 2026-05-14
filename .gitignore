@@ -20,6 +20,8 @@ captures/
 .DS_Store
 .idea/
 .vscode/
+.agent/
+.docs/
 *.suo
 *.ntvs*
 *.njsproj
