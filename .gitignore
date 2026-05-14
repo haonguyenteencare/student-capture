@@ -1,5 +1,32 @@
-.*
-!.gitignore
+# Dependencies
 node_modules/
-captures/
+.pnpm-debug.log*
+
+# Environment
 .env
+.env.*
+!.env.example
+
+# Media & Data
+captures/
+*.f32
+*.wav
+*.webm
+*.rgba
+*.webp
+*.jpg
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Build/Deploy
+.vercel
+dist/
+build/
