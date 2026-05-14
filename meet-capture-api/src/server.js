@@ -12,6 +12,16 @@ app.use(express.json({ limit: "250mb" }));
 const sanitize = (v, fallback) =>
   String(v || "").trim().replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").slice(0, 120) || fallback;
 
+// ─── Health Check ────────────────────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "Meet Capture API is running",
+    storage: "Vercel Blob",
+    timestamp: new Date().toISOString(),
+  });
+});
+
 // ─── POST /api/capture ───────────────────────────────────────────────────────
 app.post("/api/capture", async (req, res) => {
   try {
