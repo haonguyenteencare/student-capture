@@ -7,46 +7,35 @@ Xây dựng giải pháp Chrome Extension kết hợp Cloud/Local Server để g
 
 ## 2. Các cột mốc kỹ thuật đã đạt được (Phase 0 - Stability & Resilience)
 
-### ☁️ Chuyển đổi Đám mây (Cloud Migration)
-- **Vercel Blob:** Hệ thống Backend (`meet-capture-api`) đã được cấu hình để upload thẳng media lên Vercel Blob, thay thế cho việc ghi file vật lý cục bộ.
-- **Environment Variables:** Hỗ trợ cấu hình `env.js` (Extension) và `.env` (API) để luân chuyển mượt mà giữa môi trường Local và Production.
+### ☁️ Chuyển đổi Đám mây (Cloud Migration & Payload Fix)
+- **Supabase Storage:** Hệ thống Backend (`meet-capture-api`) đã chuyển đổi hoàn toàn từ Vercel Blob sang Supabase Storage.
+- **Signed URLs Architecture:** Sử dụng kiến trúc "Chìa khóa ký danh" để Extension tải dữ liệu trực tiếp lên Supabase, lách qua giới hạn 4.5MB của Vercel Serverless. Giải quyết triệt để lỗi `413 Payload Too Large`.
+- **Environment Variables:** Hỗ trợ cấu hình mượt mà qua các biến môi trường `SUPABASE_URL` và `SUPABASE_SERVICE_KEY`.
 
-### 🛡️ Cơ chế "Buffering & Persistence" (Mới)
-Khác với các phiên bản thử nghiệm trước đây, hệ thống hiện tại đã tích hợp lớp đệm dữ liệu thông minh:
-- **IndexedDB Buffer:** Sử dụng IndexedDB để lưu tạm các "chunks" media ngay tại trình duyệt. Điều này đảm bảo dữ liệu **không bao giờ bị mất** nếu Server gặp sự cố hoặc Internet bị ngắt quãng.
-- **Auto-Flush:** Hệ thống tự động đẩy dữ liệu từ IndexedDB lên Server ngay khi có mạng trở lại.
-- **Offline Robustness:** Hiển thị Overlay cảnh báo toàn màn hình và thông báo hệ thống (Notification) khi mất kết nối, yêu cầu học sinh không đóng tab để bảo vệ dữ liệu đang đợi trong hàng đợi (Queue).
-
-### 🎙️ Thu thập âm thanh (Audio Capture)
-- **WebRTC Hooking:** Can thiệp sâu vào `RTCPeerConnection` để lấy luồng audio nguyên bản của Mentor. Khắc phục hoàn toàn lỗi "câm" hoặc bị Meet chặn khi dùng API thu âm thông thường.
-- **Raw F32LE:** Thu âm định dạng Float32 Little-Endian không nén, giữ trọn vẹn dải động (dynamic range) để AI xử lý giọng nói tốt nhất.
+### 🎙️ Thu thập âm thanh (Audio Capture - Phase 1)
+- **AudioWorklet Integration:** Nâng cấp toàn bộ logic thu âm sang API `AudioWorkletNode`. Âm thanh Mentor được xử lý trên một luồng riêng biệt, không gây gánh nặng cho giao diện Google Meet.
+- **Raw F32LE:** Thu âm định dạng Float32 Little-Endian không nén, giữ trọn vẹn chất lượng raw cho AI.
 
 ### 🎥 Thu thập hình ảnh (Video Capture)
-- **Hybrid Capture:** 
-    - Thu video chuẩn **WebM (VP9/Opus)** để lưu trữ dài hạn.
-    - Chụp **RGBA Raw Frames** và **JPEG Thumbnails** định kỳ (mỗi 3s) để phục vụ các tác vụ Computer Vision thời gian thực.
-- **Hiệu năng:** Tối ưu hóa việc copy dữ liệu từ GPU sang RAM, giảm tải cho CPU học sinh.
-- **Smart Room Detection:** Chỉ ghi dữ liệu khi thực sự ở trong một phòng họp Google Meet (dựa trên regex URL), loại bỏ tình trạng rác dữ liệu khi đứng ở phòng chờ (Green Room) hoặc trang chủ.
-- **UI Identity:** Quản lý danh tính thân thiện hơn bằng cách nhập "Tên lớp" trực tiếp từ Popup của Extension.
+- **WebP Optimization:** Thay thế ảnh thô (RGBA) bằng định dạng **WebP** chất lượng cao (0.9). Điều này giúp giảm 90% dung lượng mỗi frame mà vẫn đảm bảo độ sắc nét cho xử lý Computer Vision.
+- **Smart Room Detection:** Chỉ ghi dữ liệu khi thực sự ở trong một phòng họp Google Meet.
 
-### ⚡ Tối ưu hóa truyền tải (Hotfix Phase 0)
-- **Base64 Binary Encoding:** Chuyển đổi dữ liệu nhị phân sang chuỗi Base64 bằng thuật toán chia nhỏ (chunking), giúp giảm 65% dung lượng truyền tải và triệt tiêu lỗi CPU Spike khi xử lý JSON lớn.
-- **Memory Leak Fix:** Đã cô lập và xử lý triệt để rò rỉ bộ nhớ tại Service Worker, đảm bảo Extension có thể chạy liên tục nhiều giờ mà không tăng RAM.
+### ⚡ Tối ưu hóa truyền tải (Hotfix Phase 1)
+- **Client-Side Direct Upload:** Loại bỏ hoàn toàn overhead truyền tải nhị phân qua Server trung gian, giúp tiết kiệm 100% băng thông cho server API.
 
 ## 3. Kết quả xử lý hậu kỳ
 Bộ công cụ tại `meet-capture-api` đã hoạt động ổn định:
-- **`f32-to-wav.js`**: Tự động gộp hàng nghìn chunk nhỏ, áp dụng **Noise Gate** và **Normalization** để xuất ra file `.wav` chuẩn studio.
-- **`stitch.js`**: Ghép nối các đoạn WebM rời rạc thành bản ghi video duy nhất cho mỗi vai trò (Student/Mentor).
+- **`f32-to-wav.js`**: Tự động gộp hàng nghìn chunk nhỏ, xuất file `.wav` chuẩn.
+- **`stitch.js`**: Ghép nối các đoạn WebM rời rạc.
 
 ## 4. Trạng thái & Hướng phát triển
 
 | Tính năng | Trạng thái | Ghi chú |
 | :--- | :--- | :--- |
-| Capture Audio/Video | ✅ Hoàn thiện | Hoạt động tốt trên Google Meet mới nhất. |
-| Cloud Migration | ✅ Hoàn thiện | Tích hợp thành công Vercel Blob & deploy Vercel. |
+| Capture Audio/Video | ✅ Hoàn thiện | Hoạt động tốt trên Google Meet. |
+| Cloud Migration | ✅ Hoàn thiện | Tích hợp thành công **Supabase Storage**. |
 | Chống mất dữ liệu | ✅ Hoàn thiện | Đã có IndexedDB + Offline Overlay. |
-| Tối ưu hiệu năng | ✅ Hoàn thiện | Đã fix Memory Leak & CPU Spike. |
-| AudioWorklet | ⏳ Đang làm | Phase 1: Giảm tải thêm 66% băng thông. |
+| Tối ưu hiệu năng | ✅ Hoàn thiện | **AudioWorklet** & **WebP** đã triển khai. |
 | Binary WebSocket | 📅 Kế hoạch | Phase 2: Loại bỏ overhead của HTTP/Base64. |
 
 ---
