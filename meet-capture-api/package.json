@@ -4,7 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "sync": "node sync-supabase.js",
+    "stitch:webm": "node stitch.js",
+    "stitch:frames": "node stitch-frames.js",
+    "stitch:audio": "node f32-to-wav.js",
+    "stitch:all": "npm run sync && npm run stitch:webm && npm run stitch:frames && npm run stitch:audio"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",

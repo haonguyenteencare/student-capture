@@ -24,13 +24,8 @@ async function stitchFiles() {
         if (session.startsWith(".")) continue;
         const sessionPath = path.join(studentPath, session);
 
-        const localDir = path.join(sessionPath, "recordings", "local");
-        const remoteDir = path.join(sessionPath, "recordings", "remote");
-        const oldDir = path.join(sessionPath, "recordings");
-
-        await processDirectory(localDir, "student_full_video.webm");
-        await processDirectory(remoteDir, "mentor_full_video.webm");
-        await processDirectory(oldDir, "old_full_video.webm");
+        const webmDir = path.join(sessionPath, "webm");
+        await processDirectory(webmDir);
       }
     }
   }

@@ -5,8 +5,11 @@
   let streamCount = 0;
   const hookedTracks = new WeakSet();
 
+  const meetingId = () => window.location.pathname.split("/").filter(Boolean)[0] || "unknown";
+  const sessionId = `session-${Date.now()}`;
+
   const post = (type, payload = {}) =>
-    window.postMessage({ source: "meet-poc", type, payload, at: Date.now() }, "*");
+    window.postMessage({ source: "meet-poc", type, payload, sessionId, meetingId: meetingId(), at: Date.now() }, "*");
 
   // Hàm kiểm tra xem có đang ở trong phòng họp không (dựa vào URL /abc-defg-hij)
   const isMeetingRoom = () => /^\/[a-zA-Z0-9]{3}-[a-zA-Z0-9]{4}-[a-zA-Z0-9]{3}$/.test(window.location.pathname);

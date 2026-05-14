@@ -1,23 +1,7 @@
 importScripts("env.js");
 const API = ENV.API_URL;
-const sessions = new Map();
-
-// ─── Session ──────────────────────────────────────────────────────────────────
-const getSession = (tabId, url) => {
-  if (!sessions.has(tabId)) {
-    let meetingId = "unknown";
-    try {
-      meetingId = new URL(url).pathname.split("/").filter(Boolean)[0] || "unknown";
-    } catch {}
-
-    sessions.set(tabId, {
-      sessionId: `session-${Date.now()}-tab-${tabId}`,
-      meetingId,
-      studentId: `anon-${tabId}`,
-    });
-  }
-  return sessions.get(tabId);
-};
+// We no longer manage sessions in a Map because Service Workers sleep and lose state.
+// Instead, hook.js injects sessionId and meetingId.
 
 // ─── IndexedDB Buffer ────────────────────────────────────────────────────────
 const DB_NAME = "meet-poc-buffer";
@@ -133,8 +117,15 @@ const flushBuffer = async () => {
         tx.oncomplete = resolve;
       });
     } catch (e) {
-      console.error("Flush error:", e);
-      break; // Mất mạng hoặc server lỗi, dừng flush và thử lại lần sau
+      console.error("Flush error for chunk:", chunk.id, e.message);
+      // Nếu là lỗi HTTP (413, 500...), xóa luôn chunk bị lỗi để không nghẽn hàng đợi
+      if (e.message.startsWith("HTTP") || e.message.includes("Supabase failed")) {
+        const tx = db.transaction("chunks", "readwrite");
+        tx.objectStore("chunks").delete(chunk.id);
+        console.warn("Deleted corrupted chunk to unblock queue.");
+        continue;
+      }
+      break; // Mất mạng thật sự thì dừng flush, thử lại sau
     }
   }
 };
@@ -142,7 +133,6 @@ const flushBuffer = async () => {
 // ─── Message Handler ─────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "session-ended") {
-    if (sender.tab?.id) sessions.delete(sender.tab.id);
     reply({ ok: true });
     return false;
   }
@@ -152,9 +142,10 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab?.id;
   if (!tabId) { reply({ ok: false }); return false; }
 
-  const session = getSession(tabId, msg.event.pageUrl || sender.tab.url || "https://meet.google.com/");
   const chunk = {
-    ...session,
+    sessionId: msg.event.sessionId,
+    meetingId: msg.event.meetingId,
+    studentId: `anon-${tabId}`,
     type: msg.event.type,
     payload: msg.event.payload,
     at: msg.event.at,
