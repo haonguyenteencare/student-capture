@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
 // ─── POST /api/capture ───────────────────────────────────────────────────────
 app.post("/api/capture", async (req, res) => {
   try {
-    const { sessionId, meetingId, studentId, type, at, streamId } = req.body;
+    const { sessionId, meetingId, studentId, type, at, streamId, hasWebp, hasThumb, hasRgba, uniqueId: clientUniqueId } = req.body;
 
     const baseDir = `captures/${sanitize(meetingId, "unknown-meeting")}/${sanitize(
       studentId,
@@ -39,7 +39,7 @@ app.post("/api/capture", async (req, res) => {
     )}/${sanitize(sessionId, "unknown-session")}`;
 
     const ts = at || Date.now();
-    const uniqueId = Math.random().toString(36).substring(2, 10);
+    const uniqueId = clientUniqueId || Math.random().toString(36).substring(2, 10);
     const name = `${ts}-${sanitize(streamId, "stream")}-${uniqueId}`;
 
     const getSignedUrl = async (path) => {

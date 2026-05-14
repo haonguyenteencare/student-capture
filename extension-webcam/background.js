@@ -27,8 +27,13 @@ const saveToBuffer = async (data) => {
   });
 };
 
+let isFlushing = false;
 const flushBuffer = async () => {
-  const db = await openDB();
+  if (isFlushing) return;
+  isFlushing = true;
+
+  try {
+    const db = await openDB();
 
   // Dùng vòng lặp while thay vì cursor.continue() để tránh lỗi 'The transaction has finished'
   // khi đợi các tác vụ async lâu (như fetch/upload)
@@ -52,11 +57,13 @@ const flushBuffer = async () => {
         type: chunk.type,
         at: chunk.at,
         streamId: chunk.payload.streamId,
+        uniqueId: chunk.uniqueId,
       };
 
       if (chunk.type === "video-frame") {
         meta.hasWebp = !!chunk.payload.webpDataUrl;
         meta.hasThumb = !!chunk.payload.thumbDataUrl;
+        meta.hasRgba = !!chunk.payload.rgbaBase64;
       }
 
       // 2. Lấy Signed URLs từ server
@@ -106,6 +113,9 @@ const flushBuffer = async () => {
         if (signedUrls.thumb && chunk.payload.thumbDataUrl) {
           uploads.push(putFile(signedUrls.thumb, b64toBlob(chunk.payload.thumbDataUrl, "image/jpeg")));
         }
+        if (signedUrls.rgba && chunk.payload.rgbaBase64) {
+          uploads.push(putFile(signedUrls.rgba, b64toBlob(chunk.payload.rgbaBase64, "application/octet-stream")));
+        }
       }
       else if (chunk.type === "webm-chunk" && signedUrls.webm) {
         uploads.push(putFile(signedUrls.webm, b64toBlob(chunk.payload.dataBase64, chunk.payload.mimeType || "video/webm")));
@@ -136,6 +146,9 @@ const flushBuffer = async () => {
       break; // Lỗi mạng (Failed to fetch), dừng xử lý
     }
   }
+} finally {
+    isFlushing = false;
+  }
 };
 
 
@@ -157,6 +170,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     type: msg.event.type,
     payload: msg.event.payload,
     at: msg.event.at,
+    uniqueId: Math.random().toString(36).substring(2, 10),
   };
 
   // Lưu vào IndexedDB trước, rồi thử flush ngay

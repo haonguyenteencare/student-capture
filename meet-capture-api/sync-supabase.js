@@ -29,15 +29,25 @@ async function syncFolder(currentPath) {
   for (const item of data) {
     // Supabase trả về item không có 'id' nếu nó là folder
     const isFolder = !item.id;
-    const itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+    let itemPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+
+    // Sửa lỗi lặp thư mục: Nếu path bắt đầu bằng 'captures/', hãy loại bỏ nó để lưu đúng folder local
+    let localItemPath = itemPath;
+    if (localItemPath.startsWith("captures/")) {
+      localItemPath = localItemPath.replace("captures/", "");
+    } else if (localItemPath === "captures") {
+      // Nếu là chính thư mục captures ở gốc, hãy đi sâu vào bên trong mà không tạo folder local mới
+      if (isFolder) await syncFolder(itemPath);
+      continue;
+    }
 
     if (item.name === ".emptyFolderPlaceholder") continue;
 
     if (isFolder) {
-      await fs.mkdir(path.join(capturesRoot, itemPath), { recursive: true });
+      await fs.mkdir(path.join(capturesRoot, localItemPath), { recursive: true });
       await syncFolder(itemPath);
     } else {
-      const localFilePath = path.join(capturesRoot, itemPath);
+      const localFilePath = path.join(capturesRoot, localItemPath);
       
       // Bỏ qua nếu file đã tồn tại ở local (tiết kiệm thời gian/băng thông)
       try {

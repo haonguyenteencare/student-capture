@@ -179,11 +179,20 @@
   navigator.mediaDevices.getUserMedia = async (...args) => {
     const stream = await origGUM(...args);
     const id = `local-${++streamCount}`;
-    stream.getAudioTracks().forEach((t) => captureAudio(stream, t, id));
+
+    stream.getAudioTracks().forEach((t) => {
+      if (hookedTracks.has(t)) return;
+      hookedTracks.add(t);
+      captureAudio(stream, t, id);
+    });
+
     stream.getVideoTracks().forEach((t) => {
+      if (hookedTracks.has(t)) return;
+      hookedTracks.add(t);
       captureVideo(t, id);
       captureWebM(new MediaStream([t]), `${id}-webm`);
     });
+
     return stream;
   };
 

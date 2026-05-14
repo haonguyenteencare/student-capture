@@ -50,13 +50,13 @@ function encodeWav(samples, sampleRate) {
     if (Math.abs(sample) > maxPeak) maxPeak = Math.abs(sample);
   }
   
-  const gain = maxPeak > 0.02 ? Math.min(8.0, 0.9 / maxPeak) : 1.0;
+  const gain = maxPeak > 0.02 ? Math.min(3.0, 0.8 / maxPeak) : 1.0;
 
-  // 2. Noise Gate
+  // 2. Noise Gate (Dùng Envelope Follower để mượt mà hơn)
   let envelope = 0;
-  const attack = 0.4;
-  const release = 0.002;
-  const noiseThreshold = 0.005;
+  const attack = 0.1; // Làm chậm lại để tránh méo tiếng
+  const release = 0.01;
+  const noiseThreshold = 0.002; // Ngưỡng thấp hơn cho tự nhiên
   for (const sample of samples) {
     const absSample = Math.abs(sample);
     if (absSample > envelope) envelope += attack * (absSample - envelope);
