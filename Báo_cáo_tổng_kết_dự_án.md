@@ -1,11 +1,15 @@
-# BÁO CÁO TỔNG KẾT DỰ ÁN: STUDENT MEDIA CAPTURE (Cập nhật 13/05/2026)
+# BÁO CÁO TỔNG KẾT DỰ ÁN: STUDENT MEDIA CAPTURE (Cập nhật 14/05/2026)
 
 ## 1. Mục tiêu & Phạm vi Dự án
-Xây dựng giải pháp Chrome Extension kết hợp Local Server để ghi lại dữ liệu thô (raw data) các buổi học Google Meet 1 kèm 1, phục vụ huấn luyện AI và lưu trữ chất lượng cao.
+Xây dựng giải pháp Chrome Extension kết hợp Cloud/Local Server để ghi lại dữ liệu thô (raw data) các buổi học Google Meet 1 kèm 1, phục vụ huấn luyện AI và lưu trữ chất lượng cao.
 - **Capture:** Video/Audio học sinh và Audio Mentor (giáo viên).
 - **Yêu cầu:** Không giật lag, không mất dữ liệu ngay cả khi mất mạng, xử lý hậu kỳ tự động.
 
 ## 2. Các cột mốc kỹ thuật đã đạt được (Phase 0 - Stability & Resilience)
+
+### ☁️ Chuyển đổi Đám mây (Cloud Migration)
+- **Vercel Blob:** Hệ thống Backend (`meet-capture-api`) đã được cấu hình để upload thẳng media lên Vercel Blob, thay thế cho việc ghi file vật lý cục bộ.
+- **Environment Variables:** Hỗ trợ cấu hình `env.js` (Extension) và `.env` (API) để luân chuyển mượt mà giữa môi trường Local và Production.
 
 ### 🛡️ Cơ chế "Buffering & Persistence" (Mới)
 Khác với các phiên bản thử nghiệm trước đây, hệ thống hiện tại đã tích hợp lớp đệm dữ liệu thông minh:
@@ -22,6 +26,8 @@ Khác với các phiên bản thử nghiệm trước đây, hệ thống hiện
     - Thu video chuẩn **WebM (VP9/Opus)** để lưu trữ dài hạn.
     - Chụp **RGBA Raw Frames** và **JPEG Thumbnails** định kỳ (mỗi 3s) để phục vụ các tác vụ Computer Vision thời gian thực.
 - **Hiệu năng:** Tối ưu hóa việc copy dữ liệu từ GPU sang RAM, giảm tải cho CPU học sinh.
+- **Smart Room Detection:** Chỉ ghi dữ liệu khi thực sự ở trong một phòng họp Google Meet (dựa trên regex URL), loại bỏ tình trạng rác dữ liệu khi đứng ở phòng chờ (Green Room) hoặc trang chủ.
+- **UI Identity:** Quản lý danh tính thân thiện hơn bằng cách nhập "Tên lớp" trực tiếp từ Popup của Extension.
 
 ### ⚡ Tối ưu hóa truyền tải (Hotfix Phase 0)
 - **Base64 Binary Encoding:** Chuyển đổi dữ liệu nhị phân sang chuỗi Base64 bằng thuật toán chia nhỏ (chunking), giúp giảm 65% dung lượng truyền tải và triệt tiêu lỗi CPU Spike khi xử lý JSON lớn.
@@ -37,6 +43,7 @@ Bộ công cụ tại `meet-capture-api` đã hoạt động ổn định:
 | Tính năng | Trạng thái | Ghi chú |
 | :--- | :--- | :--- |
 | Capture Audio/Video | ✅ Hoàn thiện | Hoạt động tốt trên Google Meet mới nhất. |
+| Cloud Migration | ✅ Hoàn thiện | Tích hợp thành công Vercel Blob & deploy Vercel. |
 | Chống mất dữ liệu | ✅ Hoàn thiện | Đã có IndexedDB + Offline Overlay. |
 | Tối ưu hiệu năng | ✅ Hoàn thiện | Đã fix Memory Leak & CPU Spike. |
 | AudioWorklet | ⏳ Đang làm | Phase 1: Giảm tải thêm 66% băng thông. |
@@ -44,6 +51,6 @@ Bộ công cụ tại `meet-capture-api` đã hoạt động ổn định:
 
 ---
 **Người báo cáo:** Antigravity (AI Architect)
-**Ngày cập nhật:** 13/05/2026
+**Ngày cập nhật:** 14/05/2026
 **Trạng thái chung:** **READY FOR DEPLOYMENT (STABLE)**
 
