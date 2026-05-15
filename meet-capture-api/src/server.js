@@ -32,6 +32,7 @@ app.get("/", (req, res) => {
 app.post("/api/capture", async (req, res) => {
   try {
     const { sessionId, meetingId, studentId, type, at, streamId, hasWebp, hasThumb, hasRgba, uniqueId: clientUniqueId } = req.body;
+    console.log(`[API] Capture request: type=${type}, hasRgba=${!!hasRgba}, hasThumb=${!!hasThumb}, stream=${streamId}`);
 
     const baseDir = `captures/${sanitize(meetingId, "unknown-meeting")}/${sanitize(
       studentId,
@@ -46,7 +47,13 @@ app.post("/api/capture", async (req, res) => {
       const { data, error } = await supabase.storage
         .from("captures")
         .createSignedUploadUrl(path);
-      if (error) throw error;
+      
+      if (error) {
+        if (error.message?.includes("already exists") || error.statusCode === "409") {
+          return { path, alreadyExists: true };
+        }
+        throw error;
+      }
       return { path, signedUrl: data.signedUrl };
     };
 
