@@ -35,116 +35,123 @@ const flushBuffer = async () => {
   try {
     const db = await openDB();
 
-  // Dùng vòng lặp while thay vì cursor.continue() để tránh lỗi 'The transaction has finished'
-  // khi đợi các tác vụ async lâu (như fetch/upload)
+  // Lấy tối đa 5 chunks một lúc để upload song song
   while (true) {
-    const chunk = await new Promise((resolve) => {
+    const chunks = await new Promise((resolve) => {
       const tx = db.transaction("chunks", "readonly");
       const store = tx.objectStore("chunks");
       const req = store.openCursor();
-      req.onsuccess = (e) => resolve(e.target.result ? e.target.result.value : null);
-      req.onerror = () => resolve(null);
+      const results = [];
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor && results.length < 5) {
+          results.push(cursor.value);
+          cursor.continue();
+        } else {
+          resolve(results);
+        }
+      };
+      req.onerror = () => resolve([]);
     });
 
-    if (!chunk) break;
+    if (chunks.length === 0) break;
 
-    try {
-      // 1. Chuẩn bị metadata
-      const meta = {
-        sessionId: chunk.sessionId,
-        meetingId: chunk.meetingId,
-        studentId: chunk.studentId,
-        type: chunk.type,
-        at: chunk.at,
-        streamId: chunk.payload.streamId,
-        uniqueId: chunk.uniqueId,
-      };
+    await Promise.all(chunks.map(async (chunk) => {
+      try {
+        // 1. Chuẩn bị metadata
+        const meta = {
+          sessionId: chunk.sessionId,
+          meetingId: chunk.meetingId,
+          studentId: chunk.studentId,
+          type: chunk.type,
+          at: chunk.at,
+          streamId: chunk.payload.streamId,
+          uniqueId: chunk.uniqueId,
+        };
 
-      if (chunk.type === "video-frame") {
-        meta.hasWebp = !!chunk.payload.webpDataUrl;
-        meta.hasThumb = !!chunk.payload.thumbDataUrl;
-        meta.hasRgba = !!chunk.payload.rgbaBase64;
-      }
-
-      // 2. Lấy Signed URLs từ server
-      const res = await fetch(`${API}/api/capture`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(meta),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const { signedUrls } = await res.json();
-
-      // 3. Helper chuyển Base64 thành Blob
-      const b64toBlob = (b64DataURI, fallbackType) => {
-        let b64 = b64DataURI;
-        let type = fallbackType;
-        if (b64DataURI.startsWith("data:")) {
-          const parts = b64DataURI.split(",");
-          type = parts[0].split(":")[1].split(";")[0];
-          b64 = parts[1];
+        if (chunk.type === "video-frame") {
+          meta.hasWebp = !!chunk.payload.webpDataUrl;
+          meta.hasThumb = !!chunk.payload.thumbDataUrl;
+          meta.hasRgba = !!chunk.payload.rgbaBase64;
         }
-        const bin = atob(b64);
-        const u8 = new Uint8Array(bin.length);
-        for(let i=0; i<bin.length; i++) u8[i] = bin.charCodeAt(i);
-        return new Blob([u8], { type });
-      };
 
-      // 4. Upload file nhị phân
-      const uploads = [];
-      const putFile = async (urlObj, blob) => {
-        const upRes = await fetch(urlObj.signedUrl, { method: "PUT", body: blob, headers: { "Content-Type": blob.type } });
-        if (!upRes.ok) throw new Error(`Upload to Supabase failed: ${upRes.status}`);
-      };
+        // 2. Lấy Signed URLs từ server
+        const res = await fetch(`${API}/api/capture`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(meta),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const { signedUrls } = await res.json();
 
-      if (chunk.type === "audio-chunk" && signedUrls.f32) {
-        uploads.push(putFile(signedUrls.f32, b64toBlob(chunk.payload.dataBase64, "application/octet-stream")));
-        const jsonBlob = new Blob([JSON.stringify({ 
-          sampleRate: chunk.payload.sampleRate, 
-          sampleCount: chunk.payload.sampleCount, 
-          encoding: chunk.payload.encoding 
-        })], { type: "application/json" });
-        uploads.push(putFile(signedUrls.json, jsonBlob));
-      } 
-      else if (chunk.type === "video-frame") {
-        if (signedUrls.webp && chunk.payload.webpDataUrl) {
-          uploads.push(putFile(signedUrls.webp, b64toBlob(chunk.payload.webpDataUrl, "image/webp")));
+        // 3. Helper chuyển Base64 thành Blob
+        const b64toBlob = (b64DataURI, fallbackType) => {
+          let b64 = b64DataURI;
+          let type = fallbackType;
+          if (b64DataURI.startsWith("data:")) {
+            const parts = b64DataURI.split(",");
+            type = parts[0].split(":")[1].split(";")[0];
+            b64 = parts[1];
+          }
+          const bin = atob(b64);
+          const u8 = new Uint8Array(bin.length);
+          for(let i=0; i<bin.length; i++) u8[i] = bin.charCodeAt(i);
+          return new Blob([u8], { type });
+        };
+
+        // 4. Upload file nhị phân
+        const uploads = [];
+        const putFile = async (urlObj, blob) => {
+          const upRes = await fetch(urlObj.signedUrl, { method: "PUT", body: blob, headers: { "Content-Type": blob.type } });
+          if (!upRes.ok) throw new Error(`Upload to Supabase failed: ${upRes.status}`);
+        };
+
+        if (chunk.type === "audio-chunk" && signedUrls.f32) {
+          uploads.push(putFile(signedUrls.f32, b64toBlob(chunk.payload.dataBase64, "application/octet-stream")));
+          const jsonBlob = new Blob([JSON.stringify({ 
+            sampleRate: chunk.payload.sampleRate, 
+            sampleCount: chunk.payload.sampleCount, 
+            encoding: chunk.payload.encoding 
+          })], { type: "application/json" });
+          uploads.push(putFile(signedUrls.json, jsonBlob));
+        } 
+        else if (chunk.type === "video-frame") {
+          if (signedUrls.webp && chunk.payload.webpDataUrl) {
+            uploads.push(putFile(signedUrls.webp, b64toBlob(chunk.payload.webpDataUrl, "image/webp")));
+          }
+          if (signedUrls.thumb && chunk.payload.thumbDataUrl) {
+            uploads.push(putFile(signedUrls.thumb, b64toBlob(chunk.payload.thumbDataUrl, "image/jpeg")));
+          }
+          if (signedUrls.rgba && chunk.payload.rgbaBase64) {
+            uploads.push(putFile(signedUrls.rgba, b64toBlob(chunk.payload.rgbaBase64, "application/octet-stream")));
+          }
         }
-        if (signedUrls.thumb && chunk.payload.thumbDataUrl) {
-          uploads.push(putFile(signedUrls.thumb, b64toBlob(chunk.payload.thumbDataUrl, "image/jpeg")));
+        else if (chunk.type === "webm-chunk" && signedUrls.webm) {
+          uploads.push(putFile(signedUrls.webm, b64toBlob(chunk.payload.dataBase64, chunk.payload.mimeType || "video/webm")));
         }
-        if (signedUrls.rgba && chunk.payload.rgbaBase64) {
-          uploads.push(putFile(signedUrls.rgba, b64toBlob(chunk.payload.rgbaBase64, "application/octet-stream")));
-        }
-      }
-      else if (chunk.type === "webm-chunk" && signedUrls.webm) {
-        uploads.push(putFile(signedUrls.webm, b64toBlob(chunk.payload.dataBase64, chunk.payload.mimeType || "video/webm")));
-      }
 
-      await Promise.all(uploads);
+        await Promise.all(uploads);
 
-      // 5. Xóa khỏi buffer sau khi upload thành công
-      await new Promise((resolveDel) => {
-        const deleteTx = db.transaction("chunks", "readwrite");
-        const delReq = deleteTx.objectStore("chunks").delete(chunk.id);
-        delReq.onsuccess = () => resolveDel();
-        delReq.onerror = () => resolveDel();
-      });
-
-      // Vòng lặp while sẽ tự động quay lại lấy chunk tiếp theo
-    } catch (e) {
-      console.error("Flush error for chunk:", chunk.id, e.message);
-      if (e.message.startsWith("HTTP") || e.message.includes("Supabase failed")) {
-        // Xóa chunk lỗi để không nghẽn hàng đợi
+        // 5. Xóa khỏi buffer sau khi upload thành công
         await new Promise((resolveDel) => {
           const deleteTx = db.transaction("chunks", "readwrite");
-          deleteTx.objectStore("chunks").delete(chunk.id);
-          deleteTx.oncomplete = () => resolveDel();
+          const delReq = deleteTx.objectStore("chunks").delete(chunk.id);
+          delReq.onsuccess = () => resolveDel();
+          delReq.onerror = () => resolveDel();
         });
-        continue;
+      } catch (e) {
+        console.error("Flush error for chunk:", chunk.id, e.message);
+        if (e.message.startsWith("HTTP") || e.message.includes("Supabase failed")) {
+          // Xóa chunk lỗi để không nghẽn hàng đợi
+          await new Promise((resolveDel) => {
+            const deleteTx = db.transaction("chunks", "readwrite");
+            const delReq = deleteTx.objectStore("chunks").delete(chunk.id);
+            delReq.onsuccess = () => resolveDel();
+            delReq.onerror = () => resolveDel();
+          });
+        }
       }
-      break; // Lỗi mạng (Failed to fetch), dừng xử lý
-    }
+    }));
   }
 } finally {
     isFlushing = false;

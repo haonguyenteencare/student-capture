@@ -59,7 +59,7 @@
         encoding: "f32le",
         dataBase64: btoa(bin),
       });
-    }, 5000);
+    }, 10000);
 
     track.addEventListener("ended", () => {
       clearInterval(interval);
@@ -91,7 +91,7 @@
 
         try {
           const now = performance.now();
-          if (now - lastSent < 3000) continue;
+          if (now - lastSent < 10000) continue;
 
           // Chỉ lấy frame nếu đang ở trong phòng
           if (!isMeetingRoom()) continue;
@@ -164,7 +164,7 @@
       });
     };
 
-    rec.start(5000);
+    rec.start(10000);
 
     stream.getTracks().forEach((t) =>
       t.addEventListener("ended", () => {

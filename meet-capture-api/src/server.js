@@ -58,9 +58,10 @@ app.post("/api/capture", async (req, res) => {
       signedUrls.json = await getSignedUrl(`${baseDir}/${subdir}/${name}.json`);
     } 
     else if (type === "video-frame") {
-      const { hasWebp, hasThumb } = req.body;
+      const { hasWebp, hasThumb, hasRgba } = req.body;
       if (hasWebp) signedUrls.webp = await getSignedUrl(`${baseDir}/frames/webp-${name}.webp`);
       if (hasThumb) signedUrls.thumb = await getSignedUrl(`${baseDir}/frames/thumb-${name}.jpg`);
+      if (hasRgba) signedUrls.rgba = await getSignedUrl(`${baseDir}/frames/rgba-${name}.rgba`);
     } 
     else if (type === "webm-chunk") {
       signedUrls.webm = await getSignedUrl(`${baseDir}/webm/${name}.webm`);
