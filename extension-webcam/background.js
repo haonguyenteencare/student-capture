@@ -1,55 +1,182 @@
 importScripts("env.js");
 const API = ENV.API_URL;
-// We no longer manage sessions in a Map because Service Workers sleep and lose state.
-// Instead, hook.js injects sessionId and meetingId.
 
-// ─── IndexedDB Buffer ────────────────────────────────────────────────────────
 const DB_NAME = "meet-poc-buffer";
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Upgraded to v2 for index
+const MAX_CONCURRENT = 3;
+const MAX_RETRIES = 4;
+const BACKOFF_BASE = 1000; // ms
+
+// --- Helper Functions ---
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const openDB = () =>
   new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = (e) => {
-      e.target.result.createObjectStore("chunks", { keyPath: "id", autoIncrement: true });
+      const db = e.target.result;
+      let store;
+      if (e.oldVersion < 1) {
+        store = db.createObjectStore("chunks", { keyPath: "id", autoIncrement: true });
+      } else {
+        store = req.transaction.objectStore("chunks");
+      }
+      if (e.oldVersion < 2) {
+        store.createIndex("status", "status");
+      }
     };
     req.onsuccess = (e) => resolve(e.target.result);
     req.onerror = () => reject(req.error);
   });
 
-const saveToBuffer = async (data) => {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("chunks", "readwrite");
-    tx.objectStore("chunks").add({ ...data, savedAt: Date.now() });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
+// AbortSignal.timeout polyfill wrapper for older MV3 Service Workers
+const fetchWithTimeout = async (resource, options = {}) => {
+  const { timeout = 60000 } = options;
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  const response = await fetch(resource, {
+    ...options,
+    signal: controller.signal  
   });
+  clearTimeout(id);
+  return response;
 };
 
-let isFlushing = false;
-const flushBuffer = async () => {
-  if (isFlushing) return;
-  isFlushing = true;
+// --- Controlled Upload Queue ---
+class ChunkUploadQueue {
+  constructor() {
+    this.active = 0;
+    this.dbPromise = openDB();
+    this.initPromise = this.init();
+  }
 
-  try {
-    const db = await openDB();
+  async init() {
+    const db = await this.dbPromise;
+    await this.recoverStuckChunks(db);
+  }
 
-  // Dùng vòng lặp while thay vì cursor.continue() để tránh lỗi 'The transaction has finished'
-  // khi đợi các tác vụ async lâu (như fetch/upload)
-  while (true) {
-    const chunk = await new Promise((resolve) => {
-      const tx = db.transaction("chunks", "readonly");
+  async recoverStuckChunks(db) {
+    return new Promise((resolve) => {
+      const tx = db.transaction("chunks", "readwrite");
       const store = tx.objectStore("chunks");
       const req = store.openCursor();
-      req.onsuccess = (e) => resolve(e.target.result ? e.target.result.value : null);
-      req.onerror = () => resolve(null);
+      let recoveredCount = 0;
+      
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor) {
+          const chunk = cursor.value;
+          // Recover chunks that were uploading before crash, or old v1 chunks without status
+          if (chunk.status === "uploading" || !chunk.status) {
+            chunk.status = "pending";
+            cursor.update(chunk);
+            recoveredCount++;
+          }
+          cursor.continue();
+        } else {
+          if (recoveredCount > 0) console.log(`Recovered ${recoveredCount} stuck chunks`);
+          resolve();
+        }
+      };
+      req.onerror = () => resolve();
+    });
+  }
+
+  async enqueue(chunkData) {
+    await this.initPromise;
+    const db = await this.dbPromise;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("chunks", "readwrite");
+      tx.objectStore("chunks").add({ 
+        ...chunkData, 
+        savedAt: Date.now(),
+        status: "pending",
+        retries: 0
+      });
+      tx.oncomplete = () => {
+        this.drain();
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+
+  async drain() {
+    await this.initPromise;
+    if (this.active >= MAX_CONCURRENT) return;
+    
+    const db = await this.dbPromise;
+    
+    // Get pending chunks to fill slots
+    const pendingChunks = await new Promise((resolve) => {
+      const tx = db.transaction("chunks", "readonly");
+      const index = tx.objectStore("chunks").index("status");
+      const req = index.openCursor(IDBKeyRange.only("pending"));
+      const results = [];
+      
+      req.onsuccess = (e) => {
+        const cursor = e.target.result;
+        if (cursor && results.length < (MAX_CONCURRENT - this.active)) {
+          results.push(cursor.value);
+          cursor.continue();
+        } else {
+          resolve(results);
+        }
+      };
+      req.onerror = () => resolve([]);
     });
 
-    if (!chunk) break;
+    if (pendingChunks.length === 0) return;
 
+    // Lock chunks immediately so other drain loops don't grab them
+    await new Promise((resolve) => {
+      const tx = db.transaction("chunks", "readwrite");
+      const store = tx.objectStore("chunks");
+      pendingChunks.forEach(chunk => {
+        chunk.status = "uploading";
+        store.put(chunk);
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve(); 
+    });
+
+    // Start uploads concurrently
+    for (const chunk of pendingChunks) {
+      this.active++;
+      this.uploadChunk(chunk).catch(console.error); // fire and forget
+    }
+  }
+
+  async uploadChunk(chunk) {
+    const db = await this.dbPromise;
     try {
-      // 1. Chuẩn bị metadata
+      await this.uploadWithRetry(chunk, chunk.retries || 0);
+
+      // Success -> delete from DB
+      await new Promise((resolve) => {
+        const tx = db.transaction("chunks", "readwrite");
+        tx.objectStore("chunks").delete(chunk.id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } catch (err) {
+      // Failed permanently after retries -> mark as failed
+      console.error(`Chunk ${chunk.id} failed permanently`, err);
+      await new Promise((resolve) => {
+        const tx = db.transaction("chunks", "readwrite");
+        chunk.status = "failed";
+        tx.objectStore("chunks").put(chunk);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    } finally {
+      this.active--;
+      this.drain(); // Trigger next items in queue
+    }
+  }
+
+  async uploadWithRetry(chunk, attempt) {
+    try {
       const meta = {
         sessionId: chunk.sessionId,
         meetingId: chunk.meetingId,
@@ -66,16 +193,24 @@ const flushBuffer = async () => {
         meta.hasRgba = !!chunk.payload.rgbaBase64;
       }
 
-      // 2. Lấy Signed URLs từ server
-      const res = await fetch(`${API}/api/capture`, {
+      // Lấy Signed URLs từ server (max 60s timeout)
+      const res = await fetchWithTimeout(`${API}/api/capture`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(meta),
+        timeout: 60000 
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let reason = "Unknown Server Error";
+        try {
+          const errBody = await res.json();
+          if (errBody.reason) reason = errBody.reason;
+        } catch (e) {}
+        throw new Error(`HTTP ${res.status} - ${reason}`);
+      }
       const { signedUrls } = await res.json();
+      console.log(`[Queue] Chunk ${chunk.id} signedUrls keys:`, Object.keys(signedUrls));
 
-      // 3. Helper chuyển Base64 thành Blob
       const b64toBlob = (b64DataURI, fallbackType) => {
         let b64 = b64DataURI;
         let type = fallbackType;
@@ -90,10 +225,16 @@ const flushBuffer = async () => {
         return new Blob([u8], { type });
       };
 
-      // 4. Upload file nhị phân
+      // Upload file nhị phân (max 60s timeout)
       const uploads = [];
       const putFile = async (urlObj, blob) => {
-        const upRes = await fetch(urlObj.signedUrl, { method: "PUT", body: blob, headers: { "Content-Type": blob.type } });
+        if (urlObj.alreadyExists) return; 
+        const upRes = await fetchWithTimeout(urlObj.signedUrl, { 
+          method: "PUT", 
+          body: blob, 
+          headers: { "Content-Type": blob.type },
+          timeout: 60000 
+        });
         if (!upRes.ok) throw new Error(`Upload to Supabase failed: ${upRes.status}`);
       };
 
@@ -123,34 +264,30 @@ const flushBuffer = async () => {
 
       await Promise.all(uploads);
 
-      // 5. Xóa khỏi buffer sau khi upload thành công
-      await new Promise((resolveDel) => {
-        const deleteTx = db.transaction("chunks", "readwrite");
-        const delReq = deleteTx.objectStore("chunks").delete(chunk.id);
-        delReq.onsuccess = () => resolveDel();
-        delReq.onerror = () => resolveDel();
+    } catch (err) {
+      if (attempt >= MAX_RETRIES) throw err;
+
+      const delay = BACKOFF_BASE * (2 ** attempt) + Math.random() * 500;
+      console.warn(`Retry chunk ${chunk.id} attempt ${attempt + 1} after ${Math.round(delay)}ms`);
+      await sleep(delay);
+
+      chunk.retries = attempt + 1;
+      const db = await this.dbPromise;
+      await new Promise((resolve) => {
+        const tx = db.transaction("chunks", "readwrite");
+        tx.objectStore("chunks").put(chunk);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
       });
 
-      // Vòng lặp while sẽ tự động quay lại lấy chunk tiếp theo
-    } catch (e) {
-      console.error("Flush error for chunk:", chunk.id, e.message);
-      if (e.message.startsWith("HTTP") || e.message.includes("Supabase failed")) {
-        // Xóa chunk lỗi để không nghẽn hàng đợi
-        await new Promise((resolveDel) => {
-          const deleteTx = db.transaction("chunks", "readwrite");
-          deleteTx.objectStore("chunks").delete(chunk.id);
-          deleteTx.oncomplete = () => resolveDel();
-        });
-        continue;
-      }
-      break; // Lỗi mạng (Failed to fetch), dừng xử lý
+      return this.uploadWithRetry(chunk, attempt + 1);
     }
   }
-} finally {
-    isFlushing = false;
-  }
-};
+}
 
+// Khởi tạo Global Queue
+const uploadQueue = new ChunkUploadQueue();
+uploadQueue.drain(); // Kick off whenever SW starts
 
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === "session-ended") {
@@ -163,7 +300,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   const tabId = sender.tab?.id;
   if (!tabId) { reply({ ok: false }); return false; }
 
-  const chunk = {
+  const chunkPayload = {
     sessionId: msg.event.sessionId,
     meetingId: msg.event.meetingId,
     studentId: `anon-${tabId}`,
@@ -173,10 +310,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     uniqueId: Math.random().toString(36).substring(2, 10),
   };
 
-  // Lưu vào IndexedDB trước, rồi thử flush ngay
-  saveToBuffer(chunk)
-    .then(flushBuffer)
-    .catch(() => {}); // Chunk vẫn còn trong DB, flush sau
+  uploadQueue.enqueue(chunkPayload).catch(() => {});
 
   reply({ ok: true });
   return false;
@@ -203,9 +337,8 @@ self.addEventListener("online", () => {
     message: "Đang gửi dữ liệu tồn đọng lên server...",
     priority: 1,
   });
-  flushBuffer();
+  uploadQueue.drain();
 });
 
-// Retry flush mỗi 10 giây
-setInterval(flushBuffer, 10000);
-
+// Retry/drain mỗi 10 giây để đảm bảo queue luôn chạy
+setInterval(() => uploadQueue.drain(), 10000);
